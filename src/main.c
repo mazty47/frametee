@@ -2,6 +2,7 @@
 #include "renderer/graphics_backend.h"
 #include "renderer/renderer.h"
 #include "user_interface/user_interface.h"
+#include <math.h>
 #include <particles/particle_system.h>
 #include <time.h>
 

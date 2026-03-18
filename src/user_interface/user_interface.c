@@ -592,7 +592,7 @@ void render_players(ui_handler_t *ui) {
 
     SCharacterCore *prev_core = &prev_world.m_pCharacters[i];
     // render hook
-    if (core->m_HookState >= 1) {
+    if (core->m_HookState >= 1 && (prev_core->m_HookState != HOOK_IDLE || intra > 0.25)) {
 
       // do interpolation
       vec2 hook_pos;
