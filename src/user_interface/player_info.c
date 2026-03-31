@@ -27,6 +27,15 @@ void render_player_info(gfx_handler_t *h) {
   if (igBegin("Player Info", NULL, ImGuiWindowFlags_NoFocusOnAppearing)) {
     igInputText("Name", player_info->name, 16, 0, NULL, NULL);
     igInputText("Clan", player_info->clan, 12, 0, NULL, NULL);
+
+    if (h->user_interface.finish_tick > 0) {
+      int ticks = h->user_interface.finish_tick - h->user_interface.start_tick;
+      float time = (float)ticks / 50.f;
+      int m = (int)time / 60;
+      float s = time - (m * 60);
+      igText("Finish Time: %02d:%05.2f", m, s);
+    }
+
     igInputInt("Skin Id", &player_info->skin, 1, 1, 0);
     player_info->skin = iclamp(player_info->skin, 0, MAX_SKINS - 1);
     igCheckbox("Use custom color", &player_info->use_custom_color);

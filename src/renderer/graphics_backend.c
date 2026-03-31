@@ -2,6 +2,9 @@
 #include "renderer.h"
 #include <logger/logger.h>
 #include <user_interface/user_interface.h>
+#include <stdbool.h>
+
+extern bool g_is_headless;
 
 #include <GLFW/glfw3.h>
 #include <assert.h>
@@ -118,6 +121,16 @@ static void cursor_position_callback(GLFWwindow *window, double xpos, double ypo
 }
 
 int init_gfx_handler(gfx_handler_t *handler) {
+  memset(handler, 0, sizeof(gfx_handler_t));
+  
+  if (g_is_headless) {
+    igCreateContext(NULL);
+    handler->user_interface.gfx_handler = handler;
+    ui_init_config(&handler->user_interface);
+    ui_init(&handler->user_interface, handler);
+    return 0;
+  }
+
   memset(handler, 0, sizeof(gfx_handler_t));
   handler->g_allocator = NULL;
   handler->g_instance = VK_NULL_HANDLE;
@@ -427,34 +440,43 @@ bool gfx_end_frame(gfx_handler_t *handler) {
 }
 
 void gfx_cleanup(gfx_handler_t *handler) {
-  VkResult err = vkDeviceWaitIdle(handler->g_device);
-  check_vk_result(err);
+  if (!g_is_headless) {
+    VkResult err = vkDeviceWaitIdle(handler->g_device);
+    check_vk_result(err);
+  }
 
   ui_cleanup(&handler->user_interface);
 
-  cleanup_map_resources(handler);
-  if (handler->entities_array) renderer_destroy_texture(handler, handler->entities_array);
-  handler->map_textures[0] = NULL;
+  if (!g_is_headless) {
+    cleanup_map_resources(handler);
+    if (handler->entities_array) renderer_destroy_texture(handler, handler->entities_array);
+    handler->map_textures[0] = NULL;
+  }
 
   physics_free(&handler->physics_handler);
   handler->map_data = 0x0;
 
-  renderer_cleanup(handler);
+  if (!g_is_headless) {
+    renderer_cleanup(handler);
+    destroy_offscreen_resources(handler);
+    ImGui_ImplVulkan_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+  }
 
-  // destroy offscreen resources before ImGui shutdown (ImGui holds descriptor references)
-  destroy_offscreen_resources(handler);
-
-  ImGui_ImplVulkan_Shutdown();
-  ImGui_ImplGlfw_Shutdown();
   igDestroyContext(NULL);
-  cleanup_vulkan_window(handler);
-  cleanup_vulkan(handler);
-  glfwDestroyWindow(handler->window);
-  handler->window = NULL;
-  glfwTerminate();
+
+  if (!g_is_headless) {
+    cleanup_vulkan_window(handler);
+    cleanup_vulkan(handler);
+    if (handler->window) glfwDestroyWindow(handler->window);
+    handler->window = NULL;
+    glfwTerminate();
+  }
+
 }
 
 static texture_t *load_layer_texture(gfx_handler_t *handler, uint8_t **data, uint32_t width, uint32_t height) {
+  if (g_is_headless) return NULL;
   if (!data) return handler->renderer.default_texture;
   texture_t *tex = renderer_load_compact_texture_from_array(handler, (const uint8_t **)data, width, height);
   return tex ? tex : handler->renderer.default_texture;
@@ -484,6 +506,12 @@ void on_map_load(gfx_handler_t *handler) {
   handler->renderer.camera.pos[1] = 0.5f;
   handler->map_data = &handler->physics_handler.collision.m_MapData;
 
+  if (g_is_headless) {
+    handler->map_data = &handler->physics_handler.collision.m_MapData;
+    wc_copy_world(&handler->user_interface.timeline.vec.data[0], &handler->physics_handler.world);
+    wc_copy_world(&handler->user_interface.timeline.previous_world, &handler->physics_handler.world);
+    return;
+  }
   // entities texture
   handler->map_textures[handler->map_texture_count++] = handler->entities_array ? handler->entities_array : handler->renderer.default_texture;
 
@@ -536,6 +564,7 @@ static int init_window(gfx_handler_t *handler) {
 
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
   glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
+  
   handler->window = glfwCreateWindow(1920, 1080, "frametee", NULL, NULL);
   if (!handler->window) {
     glfwTerminate();
@@ -685,6 +714,9 @@ void ayu_dark(void) {
 }
 
 float gfx_get_ui_scale(void) {
+  extern bool g_is_headless;
+  if (g_is_headless) return 1.0f;
+
   static float dpi = -1.f;
   if (dpi != -1.f)
     return dpi;
@@ -697,7 +729,6 @@ float gfx_get_ui_scale(void) {
   int width_px, height_px;
   glfwGetMonitorWorkarea(mon, &p0, &p1, &width_px, &height_px);
   float dia_px = sqrtf(width_px * width_px + height_px * height_px);
-  printf("scale: %.2f\n", dia_px / dia_inch);
   dpi = dia_px / dia_inch;
   return dpi;
 }

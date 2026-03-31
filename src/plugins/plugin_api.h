@@ -15,6 +15,7 @@ struct tas_context_t {
   timeline_state_t *timeline;
   gfx_handler_t *gfx_handler;
   struct ImGuiContext *imgui_context;
+  bool is_headless;
 };
 
 // api functions provided to plugins for interacting with the host application.
@@ -37,10 +38,18 @@ struct tas_api_t {
   void (*draw_circle_world)(vec2 center, float radius, vec4 color);
   void (*draw_text_world)(vec2 pos, const char *text, vec4 color);
 
+  void (*screen_to_world)(float screen_x, float screen_y, float *world_x, float *world_y);
+  void (*world_to_screen)(float world_x, float world_y, float *screen_x, float *screen_y);
+
+  double (*get_time)(void);
+  void (*get_camera_info)(vec2 pos, float *zoom);
+
   // Utility API
   void (*log_info)(const char *plugin_name, const char *message);
   void (*log_warning)(const char *plugin_name, const char *message);
   void (*log_error)(const char *plugin_name, const char *message);
+
+  void (*register_script_command)(const char *name, void (*callback)(int argc, const char **argv));
 };
 
 struct plugin_info_t {

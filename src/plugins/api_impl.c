@@ -3,6 +3,7 @@
 #include "../renderer/graphics_backend.h"
 #include "../user_interface/timeline/timeline_commands.h"
 #include "../user_interface/timeline/timeline_model.h"
+#include "../scripting/script_engine.h"
 #include "renderer/renderer.h"
 #include <ddnet_physics/gamecore.h>
 #include <stdio.h>
@@ -15,6 +16,10 @@
 // this global pointer allows the static API functions to access the application's state.
 // it is set once by api_init() and is internal to this file.
 static ui_handler_t *g_ui_handler_for_api = NULL;
+
+static void api_register_script_command(const char *name, void (*callback)(int argc, const char **argv)) {
+  script_engine_register_command(name, callback);
+}
 
 static int api_get_current_tick(void) { return g_ui_handler_for_api->timeline.current_tick; }
 
@@ -77,7 +82,37 @@ static void api_register_undo_command(struct undo_command_t *command) {
 }
 
 static void api_draw_line_world(vec2 start, vec2 end, float z, vec4 color, float thickness) {
-  renderer_submit_line(g_ui_handler_for_api->gfx_handler, z, start, end, color, thickness);
+  extern bool g_is_headless;
+  if (g_is_headless) return;
+  renderer_submit_line(g_ui_handler_for_api->gfx_handler, z + 10.0f, start, end, color, thickness);
+}
+
+static void api_draw_circle_world(vec2 center, float radius, vec4 color) {
+  extern bool g_is_headless;
+  if (g_is_headless) return;
+  renderer_submit_circle_filled(g_ui_handler_for_api->gfx_handler, 10.0f, center, radius, color, 16);
+}
+
+static void api_draw_text_world(vec2 pos, const char *text, vec4 color) {
+  // Not implemented yet in renderer, but we should have a stub to avoid NULL call
+  (void)pos; (void)text; (void)color;
+}
+
+static void api_screen_to_world(float screen_x, float screen_y, float *world_x, float *world_y) {
+  screen_to_world(g_ui_handler_for_api->gfx_handler, screen_x, screen_y, world_x, world_y);
+}
+
+static void api_world_to_screen(float world_x, float world_y, float *screen_x, float *screen_y) {
+  world_to_screen(g_ui_handler_for_api->gfx_handler, world_x, world_y, screen_x, screen_y);
+}
+
+static double api_get_time(void) {
+  return glfwGetTime();
+}
+
+static void api_get_camera_info(vec2 pos, float *zoom) {
+  glm_vec2_copy(g_ui_handler_for_api->gfx_handler->renderer.camera.pos, pos);
+  *zoom = g_ui_handler_for_api->gfx_handler->renderer.camera.zoom;
 }
 
 tas_api_t api_init(ui_handler_t *ui_handler) {
@@ -93,8 +128,15 @@ tas_api_t api_init(ui_handler_t *ui_handler) {
       .do_create_snippet = api_do_create_snippet,
       .do_set_inputs = api_do_set_inputs,
       .draw_line_world = api_draw_line_world,
+      .draw_circle_world = api_draw_circle_world,
+      .draw_text_world = api_draw_text_world,
+      .screen_to_world = api_screen_to_world,
+      .world_to_screen = api_world_to_screen,
+      .get_time = api_get_time,
+      .get_camera_info = api_get_camera_info,
       .log_info = api_log_info,
       .log_warning = api_log_warning,
       .log_error = api_log_error,
+      .register_script_command = api_register_script_command,
   };
 }

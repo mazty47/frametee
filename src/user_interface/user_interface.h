@@ -37,6 +37,9 @@ struct ui_handler_t {
   int prediction_length;
   int pos_x;
   int pos_y;
+  int current_tick;
+  int start_tick;
+  int finish_tick;
   int freezetime;
   int reloadtime;
   int weapon;

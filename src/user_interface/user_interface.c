@@ -266,6 +266,9 @@ void render_player_manager(ui_handler_t *ui) {
     igText("Players: %d", ts->player_track_count);
 
     igSeparator();
+    SWorldCore world = wc_empty();
+    model_get_world_state_at_tick(&ui->timeline, ui->timeline.current_tick, &world, true);
+
     for (int i = 0; i < ts->player_track_count; i++) {
       igPushID_Int(i);
       bool sel = (i == ts->selected_player_track_index);
@@ -275,6 +278,15 @@ void render_player_manager(ui_handler_t *ui) {
       igSetNextItemAllowOverlap();
       if (igSelectable_Bool(label, sel, ImGuiSelectableFlags_AllowDoubleClick, (ImVec2){0, 0})) {
         ts->selected_player_track_index = i;
+      }
+
+      if (i < world.m_NumCharacters && world.m_pCharacters[i].m_FinishTick > 0) {
+        int ticks = world.m_pCharacters[i].m_FinishTick - world.m_pCharacters[i].m_StartTick;
+        float time = (float)ticks / 50.f;
+        int m = (int)time / 60;
+        float s = time - (m * 60);
+        igSameLine(0, 10.f * dpi_scale);
+        igTextDisabled("%02d:%05.2f", m, s);
       }
 
       ImVec2 vMin;
@@ -293,6 +305,7 @@ void render_player_manager(ui_handler_t *ui) {
       }
       igPopID();
     }
+    wc_free(&world);
     if (ts->player_track_count > 0) igSeparator();
   }
   if (igBeginPopupModal("Confirm remove player", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -411,17 +424,21 @@ void ui_init(ui_handler_t *ui, gfx_handler_t *gfx_handler) {
   camera_init(&gfx_handler->renderer.camera);
   undo_manager_init(&ui->undo_manager);
   skin_manager_init(&ui->skin_manager);
-  NFD_Init();
+  extern bool g_is_headless;
+  if (!g_is_headless) {
+    NFD_Init();
+  }
 
   ui->plugin_api = api_init(ui);
   ui->plugin_context.ui_handler = ui;
   ui->plugin_context.timeline = &ui->timeline;
   ui->plugin_context.gfx_handler = gfx_handler;
   ui->plugin_context.imgui_context = igGetCurrentContext();
+  extern bool g_is_headless;
+  ui->plugin_context.is_headless = g_is_headless;
   plugin_manager_init(&ui->plugin_manager, &ui->plugin_context, &ui->plugin_api);
   plugin_manager_load_all(&ui->plugin_manager, "plugins");
 
-  particle_system_init(&ui->particle_system);
 
   ui->num_pickups = 0;
   ui->pickups = NULL;
@@ -798,6 +815,7 @@ void render_players(ui_handler_t *ui) {
     renderer_submit_circle_filled(gfx, Z_LAYER_PREDICTION_LINES, p0, 0.2, ent->m_Type == WEAPON_LASER ? lsr_col : sg_col, 8);
   }
 
+  ui->current_tick = world.m_GameTick;
   if (ui->timeline.selected_player_track_index >= 0) {
     SCharacterCore *p = &world.m_pCharacters[ui->timeline.selected_player_track_index];
     ui->pos_x = vgetx(p->m_Pos) - 200 * 32;
@@ -808,6 +826,8 @@ void render_players(ui_handler_t *ui) {
     ui->vel_r = p->m_VelRamp;
     ui->freezetime = p->m_FreezeTime;
     ui->reloadtime = p->m_ReloadTimer;
+    ui->start_tick = p->m_StartTick;
+    ui->finish_tick = p->m_FinishTick;
     ui->weapon = p->m_ActiveWeapon;
     for (int i = 0; i < NUM_WEAPONS; ++i)
       ui->weapons[i] = p->m_aWeaponGot[i];
@@ -1118,6 +1138,19 @@ bool ui_render_late(ui_handler_t *ui) {
       igText("Reload: %d", ui->reloadtime);
       igText("Weapon: %d", ui->weapon);
       igText("Weapons: [ %d, %d, %d, %d, %d, %d ]", ui->weapons[0], ui->weapons[1], ui->weapons[2], ui->weapons[3], ui->weapons[4], ui->weapons[5]);
+      if (ui->finish_tick >= 0) {
+        int ticks = ui->finish_tick - ui->start_tick;
+        float time = (float)ticks / 50.f;
+        int m = (int)time / 60;
+        float s = time - (m * 60);
+        igText("Finish Time: %02d:%05.2f", m, s);
+      } else if (ui->start_tick >= 0) {
+        int ticks = ui->current_tick - ui->start_tick;
+        float time = (float)ticks / 50.f;
+        int m = (int)time / 60;
+        float s = time - (m * 60);
+        igText("Time: %02d:%05.2f", m, s);
+      }
       SPlayerInput Input = ui->timeline.player_tracks[ui->timeline.selected_player_track_index].current_input;
       if (!ui->timeline.recording)
         Input = model_get_input_at_tick(&ui->timeline, ui->timeline.selected_player_track_index, ui->timeline.current_tick);
@@ -1209,5 +1242,8 @@ void ui_cleanup(ui_handler_t *ui) {
   timeline_cleanup(&ui->timeline);
   undo_manager_cleanup(&ui->undo_manager);
   skin_manager_free(&ui->skin_manager);
-  NFD_Quit();
+  extern bool g_is_headless;
+  if (!g_is_headless) {
+    NFD_Quit();
+  }
 }

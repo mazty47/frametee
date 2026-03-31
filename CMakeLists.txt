@@ -24,6 +24,7 @@ set(SRCS
 	src/physics/physics.c
 	src/plugins/api_impl.c
 	src/plugins/plugin_manager.c
+	src/scripting/script_engine.c
 	src/renderer/graphics_backend.c
 	src/renderer/renderer.c
 	src/user_interface/skin_browser.c

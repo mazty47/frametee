@@ -2,9 +2,12 @@
 #include "renderer/graphics_backend.h"
 #include "renderer/renderer.h"
 #include "user_interface/user_interface.h"
+#include "scripting/script_engine.h"
 #include <math.h>
 #include <particles/particle_system.h>
 #include <time.h>
+#include <stdio.h>
+#include <string.h>
 
 #define GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_VULKAN
@@ -14,12 +17,31 @@
 #include <windows.h>
 #endif
 
-int main(void) {
+bool g_is_headless = false;
+
+int main(int argc, char **argv) {
+  const char *auto_script = NULL;
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--auto") == 0 && i + 1 < argc) {
+      g_is_headless = true;
+      auto_script = argv[++i];
+    }
+  }
+
   logger_init();
 
   static struct gfx_handler_t handler;
   if (init_gfx_handler(&handler) != 0) return 1;
   handler.map_data = &handler.physics_handler.collision.m_MapData;
+
+  script_engine_init(&handler.user_interface.plugin_context, &handler.user_interface.plugin_api);
+
+  if (g_is_headless && auto_script) {
+    script_engine_run(auto_script);
+    log_info("ScriptEngine", "Auto script finished.");
+    gfx_cleanup(&handler);
+    return 0;
+  }
 
   bool viewport_hovered = false;
   double last_time = glfwGetTime();

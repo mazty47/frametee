@@ -39,6 +39,7 @@ static void ui_particle_callback(mvec2 pos, int type, int cid, void *user_data) 
   else if (type == PARTICLE_TYPE_BULLET_STARS) particles_create_star(&ui->particle_system, p);
   else if (type == PARTICLE_TYPE_EXPLOSION) particles_create_explosion(&ui->particle_system, p);
   else if (type == PARTICLE_TYPE_HAMMER_HIT) particles_create_hammer_hit(&ui->particle_system, p, default_alpha);
+  else if (type == PARTICLE_TYPE_CONFETTI) particles_create_confetti(&ui->particle_system, p, default_alpha);
 }
 
 // New sorting helper for the compaction algorithm
