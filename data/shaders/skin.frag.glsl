@@ -115,8 +115,8 @@ void main() {
   vec2 uv_back = apply_anim(frag_uv, frag_back, foot);
   vec2 uv_front = apply_anim(frag_uv, frag_front, foot);
 
-  final_color = blend_pma(final_color, get_part_color(foot_shadow, uv_back, frag_skin_index, false, false, false));
   final_color = blend_pma(final_color, get_part_color(body_shadow, uv_body, frag_skin_index, true, false, false));
+  final_color = blend_pma(final_color, get_part_color(foot_shadow, uv_back, frag_skin_index, false, false, false));
   final_color = blend_pma(final_color, get_part_color(foot_shadow, uv_front, frag_skin_index, false, false, false));
   final_color = blend_pma(final_color, get_part_color(foot, uv_back, frag_skin_index, false, false, false));
   final_color = blend_pma(final_color, get_part_color(body, uv_body, frag_skin_index, true, true, false));
