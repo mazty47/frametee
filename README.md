@@ -161,3 +161,4 @@ FrameTee is open-source. Contributions are accepted through issue reports and pu
 
 **Contact:**
 *   Discord: `teero777`
+*   Matrix: `@teero888:matrix.org`
