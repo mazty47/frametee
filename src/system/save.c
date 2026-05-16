@@ -1,4 +1,5 @@
 #include "save.h"
+#include "fs.h"
 #include <ddnet_physics/gamecore.h>
 #include <logger/logger.h>
 #include <renderer/graphics_backend.h>
@@ -23,7 +24,7 @@ static bool read_and_load_timeline(FILE *f, ui_handler_t *ui, uint32_t version);
 
 // Saving {{{
 bool save_project(ui_handler_t *ui, const char *path) {
-  FILE *f = fopen(path, "wb");
+  FILE *f = fs_open(path, "wb");
   if (!f) {
     log_error(LOG_SOURCE, "Failed to open file for writing: '%s'", path);
     return false;
@@ -87,7 +88,7 @@ static bool write_skin_data(FILE *f, ui_handler_t *ui) {
     if (!skin_info->data || skin_info->data_size == 0) {
       // Try to load from path if data is missing (legacy/fallback)
       if (strlen(skin_info->path) > 0) {
-        FILE *skin_file = fopen(skin_info->path, "rb");
+        FILE *skin_file = fs_open(skin_info->path, "rb");
         if (skin_file) {
           fseek(skin_file, 0, SEEK_END);
           long texture_size = ftell(skin_file);
@@ -155,7 +156,7 @@ static bool write_timeline_data(FILE *f, timeline_state_t *ts) {
 
 // Loading {{{
 bool load_project(ui_handler_t *ui, const char *path) {
-  FILE *f = fopen(path, "rb");
+  FILE *f = fs_open(path, "rb");
   if (!f) {
     log_error(LOG_SOURCE, "Failed to open file for reading: '%s'", path);
     return false;

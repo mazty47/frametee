@@ -1,4 +1,5 @@
 #include "demo.h"
+#include <system/fs.h>
 #include "ddnet_physics/vmath.h"
 #include "nfd.h"
 #include "timeline/timeline_model.h"
@@ -476,7 +477,7 @@ int export_to_demo(ui_handler_t *ui, const char *path, const char *map_name, int
   map_sha256_final(&ctx, map_sha256);
 
   dd_demo_writer *writer = demo_w_create();
-  FILE *f_demo = fopen(path, "wb");
+  FILE *f_demo = fs_open(path, "wb");
   if (!writer || !f_demo) {
     log_error(LOG_SOURCE, "Error: Could not create demo writer or open output file.");
     return 1;

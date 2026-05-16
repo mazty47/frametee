@@ -1,4 +1,5 @@
 #include "skin_browser.h"
+#include <system/fs.h>
 #include "nfd.h"
 #include "player_info.h"
 #include "stb_image.h"
@@ -34,7 +35,7 @@ void render_skin_browser(gfx_handler_t *h) {
         nfdchar_t *path;
         NFD_PathSet_GetPathU8(path_set, i, &path);
 
-        FILE *f = fopen(path, "rb");
+        FILE *f = fs_open(path, "rb");
         if (f) {
           fseek(f, 0, SEEK_END);
           size_t file_size = ftell(f);

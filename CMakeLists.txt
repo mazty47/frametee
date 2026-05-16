@@ -20,6 +20,7 @@ set(SRCS
 	src/animation/anim_system.c
 	src/system/save.c
 	src/system/config.c
+	src/system/fs.c
 	src/logger/logger.c
 	src/physics/physics.c
 	src/plugins/api_impl.c

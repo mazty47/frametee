@@ -1,4 +1,5 @@
 #include "renderer.h"
+#include <system/fs.h>
 #include "graphics_backend.h"
 #include <cglm/cglm.h>
 #include <logger/logger.h>
@@ -294,7 +295,7 @@ VkSampler create_texture_sampler(gfx_handler_t *handler, uint32_t mip_levels, Vk
 }
 
 static char *read_file(const char *filename, size_t *length) {
-  FILE *file = fopen(filename, "rb");
+  FILE *file = fs_open(filename, "rb");
   if (!file) {
     log_error(LOG_SOURCE, "Failed to open file: %s", filename);
     return NULL;
@@ -1031,7 +1032,13 @@ texture_t *renderer_load_texture(gfx_handler_t *handler, const char *image_path)
   }
 
   int tex_width, tex_height, tex_channels;
-  stbi_uc *pixels = stbi_load(image_path, &tex_width, &tex_height, &tex_channels, STBI_rgb_alpha);
+  FILE *f = fs_open(image_path, "rb");
+  if (!f) {
+    log_error(LOG_SOURCE, "Failed to open texture file: %s", image_path);
+    return NULL;
+  }
+  stbi_uc *pixels = stbi_load_from_file(f, &tex_width, &tex_height, &tex_channels, STBI_rgb_alpha);
+  fclose(f);
   if (!pixels) {
     log_error(LOG_SOURCE, "Failed to load texture image: %s", image_path);
     return NULL;
@@ -2024,7 +2031,7 @@ int renderer_load_skin_from_memory(gfx_handler_t *h, const unsigned char *buffer
 }
 
 int renderer_load_skin_from_file(gfx_handler_t *h, const char *path, texture_t **out_preview_texture) {
-  FILE *f = fopen(path, "rb");
+  FILE *f = fs_open(path, "rb");
   if (!f) {
     if (out_preview_texture) *out_preview_texture = NULL;
     return -1;

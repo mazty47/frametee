@@ -1,4 +1,5 @@
 #include "config.h"
+#include "fs.h"
 #include <logger/logger.h>
 #include <system/include_cimgui.h>
 #include <tomlc17.h>
@@ -99,7 +100,7 @@ void config_load(ui_handler_t *ui) {
   char config_path[1024];
   get_config_path(config_path, sizeof(config_path));
 
-  FILE *fp = fopen(config_path, "r");
+  FILE *fp = fs_open(config_path, "r");
   if (!fp) {
     log_info(LOG_SOURCE, "No config file found at %s, using defaults.", config_path);
     return;
@@ -212,7 +213,7 @@ void config_save(ui_handler_t *ui) {
   char config_path[1024];
   get_config_path(config_path, sizeof(config_path));
 
-  FILE *fp = fopen(config_path, "w");
+  FILE *fp = fs_open(config_path, "w");
   if (!fp) {
     log_error(LOG_SOURCE, "Failed to open config file for writing at %s.", config_path);
     return;

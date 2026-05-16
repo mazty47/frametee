@@ -1,4 +1,5 @@
 #include "script_engine.h"
+#include <system/fs.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,7 +69,7 @@ void script_engine_run(const char *script_path) {
     script_engine_register_command("spawn_character", cmd_spawn_character);
     script_engine_register_command("tick", cmd_tick);
 
-    FILE *f = fopen(script_path, "r");
+    FILE *f = fs_open(script_path, "r");
     if (!f) {
         log_error(LOG_SOURCE, "Failed to open script file: %s", script_path);
         return;
