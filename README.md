@@ -1,6 +1,6 @@
 # FrameTee
 
-**FrameTee** is a Tool-Assisted Speedrun (TAS) editor for [DDNet](https://github.com/ddnet/ddnet), built with C99, Vulkan, and ImGui.
+**FrameTee** is a Tool-Assisted Speedrun (TAS) editor for [DDNet](https://github.com/ddnet/ddnet), built using C99, Vulkan, and ImGui.
 
 > **Note:** This project is a Work In Progress (WIP). Expect bugs, crashes, and missing features. Physics and project file formats are subject to change.
 > Currently, there is **no macOS support**.
