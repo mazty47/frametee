@@ -133,7 +133,7 @@ static bool write_timeline_data(FILE *f, timeline_state_t *ts) {
     player_track_t *track = &ts->player_tracks[i];
     fwrite(&track->snippet_count, sizeof(int), 1, f);
     for (int j = 0; j < track->snippet_count; j++) {
-      input_snippet_t *snippet = &track->snippets[j];
+      snippet_t *snippet = &track->snippets[j];
       fwrite(&snippet->id, sizeof(int), 1, f);
       fwrite(&snippet->start_tick, sizeof(int), 1, f);
       fwrite(&snippet->end_tick, sizeof(int), 1, f);
@@ -304,9 +304,9 @@ static bool read_and_load_timeline(FILE *f, ui_handler_t *ui, uint32_t version) 
     player_track_t *track = &ts->player_tracks[i];
     if (fread(&track->snippet_count, sizeof(int), 1, f) != 1) return false;
 
-    track->snippets = calloc(track->snippet_count, sizeof(input_snippet_t));
+    track->snippets = calloc(track->snippet_count, sizeof(snippet_t));
     for (int j = 0; j < track->snippet_count; j++) {
-      input_snippet_t *snippet = &track->snippets[j];
+      snippet_t *snippet = &track->snippets[j];
       if (fread(&snippet->id, sizeof(int), 1, f) != 1) return false;
       if (fread(&snippet->start_tick, sizeof(int), 1, f) != 1) return false;
       if (fread(&snippet->end_tick, sizeof(int), 1, f) != 1) return false;

@@ -78,9 +78,9 @@ static void fill_tracks_with_random_inputs(random_input_state_t *state) {
       fill_count = state->snippet_length;
     } else {
       player_track_t *track = &ts->player_tracks[track_index];
-      input_snippet_t *target_snippet = NULL;
+      snippet_t *target_snippet = NULL;
       for (int s = 0; s < track->snippet_count; ++s) {
-        input_snippet_t *snip = &track->snippets[s];
+        snippet_t *snip = &track->snippets[s];
         if (snip->start_tick <= state->start_tick && snip->end_tick > state->start_tick) {
           target_snippet = snip;
           break;

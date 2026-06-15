@@ -16,15 +16,31 @@ struct physics_v_t {
   uint32_t max_size;
 };
 
-struct input_snippet_t {
+typedef enum {
+  SNIPPET_TYPE_INPUT,
+  SNIPPET_TYPE_CHARACTER,
+} snippet_type_t;
+
+struct snippet_t {
   int id;
   int start_tick;
   int end_tick;
   bool is_active;
   int layer;
+  snippet_type_t type;
+
+  // Use a flat structure (fat struct) for C99 compatibility and to keep existing code working
   SPlayerInput *inputs;
   int input_count;
+
+  SCharacterCore *characters;
+  int character_count;
 };
+
+typedef struct {
+  SCharacterCore *states;
+  int num_states;
+} player_track_demo_data_t;
 
 struct starting_config_t {
   vec2 position;
@@ -47,12 +63,12 @@ typedef enum {
 } dummy_copy_flags_t;
 
 struct player_track_t {
-  input_snippet_t *snippets;
+  snippet_t *snippets;
   int snippet_count;
   int snippet_capacity;
 
   // A temporary buffer for non-destructive recording
-  input_snippet_t *recording_snippets;
+  snippet_t *recording_snippets;
   int recording_snippet_count;
   int recording_snippet_capacity;
 
@@ -63,6 +79,8 @@ struct player_track_t {
   starting_config_t starting_config;
   bool is_dummy;
   int dummy_copy_flags;
+
+  player_track_demo_data_t demo_data;
 };
 
 struct dragged_snippet_info_t {
@@ -89,7 +107,7 @@ struct snippet_id_vector_t {
 };
 
 struct recording_snippet_vector_t {
-  input_snippet_t **snippets;
+  snippet_t **snippets;
   int count;
   int capacity;
 };

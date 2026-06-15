@@ -99,7 +99,7 @@ void interaction_apply_dummy_inputs(ui_handler_t *ui) {
 void interaction_update_mouse(timeline_state_t *ts) {
   if (ts->recording) {
     player_track_t *track = &ts->player_tracks[ts->selected_player_track_index];
-    input_snippet_t *active_rec_snip = active_rec_snip = &track->recording_snippets[track->recording_snippet_count - 1];
+    snippet_t *active_rec_snip = active_rec_snip = &track->recording_snippets[track->recording_snippet_count - 1];
     if (ts->current_tick < active_rec_snip->end_tick) {
       float speed_scale = ts->is_reversing ? 2.0f : 1.0f;
       float intra = fminf((igGetTime() - ts->last_update_time) / (1.f / (ts->playback_speed * speed_scale)), 1.f);
@@ -241,7 +241,7 @@ static void handle_pan_and_zoom(timeline_state_t *ts, ImRect timeline_bb) {
 
 static void start_drag(timeline_state_t *ts, int snippet_id, ImRect timeline_bb) {
   ImGuiIO *io = igGetIO_Nil();
-  input_snippet_t *snippet = model_find_snippet_by_id(ts, snippet_id, NULL);
+  snippet_t *snippet = model_find_snippet_by_id(ts, snippet_id, NULL);
   if (!snippet) return;
 
   ts->drag_state.active = true;
@@ -265,7 +265,7 @@ static void start_drag(timeline_state_t *ts, int snippet_id, ImRect timeline_bb)
   for (int i = 0; i < ts->selected_snippets.count; i++) {
     int sid = ts->selected_snippets.ids[i];
     int s_track_idx = -1;
-    input_snippet_t *s = model_find_snippet_by_id(ts, sid, &s_track_idx);
+    snippet_t *s = model_find_snippet_by_id(ts, sid, &s_track_idx);
     if (s) {
       ts->drag_state.drag_infos[i].snippet_id = sid;
       ts->drag_state.drag_infos[i].track_offset = s_track_idx - clicked_track_idx;
@@ -276,7 +276,7 @@ static void start_drag(timeline_state_t *ts, int snippet_id, ImRect timeline_bb)
 
 void interaction_calculate_drag_destination(timeline_state_t *ts, ImRect timeline_bb, float scroll_y, int *out_snapped_tick, int *out_base_track) {
   ImGuiIO *io = igGetIO_Nil();
-  input_snippet_t *clicked_snippet = model_find_snippet_by_id(ts, ts->drag_state.dragged_snippet_id, NULL);
+  snippet_t *clicked_snippet = model_find_snippet_by_id(ts, ts->drag_state.dragged_snippet_id, NULL);
   if (!clicked_snippet) return;
 
   int mouse_tick = renderer_screen_x_to_tick(ts, io->MousePos.x, timeline_bb.Min.x);
@@ -301,7 +301,7 @@ static void handle_snippet_drag_and_drop(timeline_state_t *ts, ImRect timeline_b
   for (int i = 0; i < ts->player_track_count; ++i) {
     player_track_t *track = &ts->player_tracks[i];
     for (int j = 0; j < track->snippet_count; ++j) {
-      input_snippet_t *snippet = &track->snippets[j];
+      snippet_t *snippet = &track->snippets[j];
 
       float start_x = renderer_tick_to_screen_x(ts, snippet->start_tick, timeline_bb.Min.x);
       float end_x = renderer_tick_to_screen_x(ts, snippet->end_tick, timeline_bb.Min.x);
@@ -377,7 +377,7 @@ static void handle_snippet_drag_and_drop(timeline_state_t *ts, ImRect timeline_b
     int final_tick, final_track;
     interaction_calculate_drag_destination(ts, timeline_bb, tracks_scroll_y, &final_tick, &final_track);
 
-    input_snippet_t *clicked_snippet = model_find_snippet_by_id(ts, ts->drag_state.dragged_snippet_id, NULL);
+    snippet_t *clicked_snippet = model_find_snippet_by_id(ts, ts->drag_state.dragged_snippet_id, NULL);
     if (clicked_snippet) {
       int tick_delta = final_tick - clicked_snippet->start_tick;
 
@@ -387,7 +387,7 @@ static void handle_snippet_drag_and_drop(timeline_state_t *ts, ImRect timeline_b
       for (int i = 0; i < ts->drag_state.drag_info_count; ++i) {
         dragged_snippet_info_t *d_info = &ts->drag_state.drag_infos[i];
         int s_track_idx;
-        input_snippet_t *s = model_find_snippet_by_id(ts, d_info->snippet_id, &s_track_idx);
+        snippet_t *s = model_find_snippet_by_id(ts, d_info->snippet_id, &s_track_idx);
         if (!s) continue;
 
         int new_track = final_track + d_info->track_offset;
@@ -464,7 +464,7 @@ static void select_snippets_in_rect(timeline_state_t *ts, ImRect rect, ImRect ti
     }
 
     for (int j = 0; j < track->snippet_count; ++j) {
-      input_snippet_t *snip = &track->snippets[j];
+      snippet_t *snip = &track->snippets[j];
 
       // Calculate the snippet's on-screen bounding box (mirroring render/hitbox logic)
       float start_x = renderer_tick_to_screen_x(ts, snip->start_tick, timeline_bb.Min.x);
@@ -504,7 +504,7 @@ static int calculate_snapped_tick(const timeline_state_t *ts, int desired_start_
   // Snap to other snippets
   for (int i = 0; i < ts->player_track_count; ++i) {
     for (int j = 0; j < ts->player_tracks[i].snippet_count; ++j) {
-      input_snippet_t *other = &ts->player_tracks[i].snippets[j];
+      snippet_t *other = &ts->player_tracks[i].snippets[j];
       if (other->id == exclude_id) continue;
 
       // Snap start to other start
@@ -546,7 +546,7 @@ static void interaction_start_recording_on_track(timeline_state_t *ts, int track
   player_track_t *track = &ts->player_tracks[track_index];
 
   // Create a new snippet to record into
-  input_snippet_t new_snippet = {0};
+  snippet_t new_snippet = {0};
   new_snippet.id = ts->next_snippet_id++;
   new_snippet.start_tick = ts->current_tick;
   new_snippet.end_tick = ts->current_tick;
@@ -557,10 +557,10 @@ static void interaction_start_recording_on_track(timeline_state_t *ts, int track
   model_insert_snippet_into_recording_track(track, &new_snippet);
 
   // Find the pointer to the newly inserted snippet and add it to our recording list
-  input_snippet_t *recording_target = &track->recording_snippets[track->recording_snippet_count - 1];
+  snippet_t *recording_target = &track->recording_snippets[track->recording_snippet_count - 1];
   if (ts->recording_snippets.count >= ts->recording_snippets.capacity) {
     ts->recording_snippets.capacity = ts->recording_snippets.capacity == 0 ? 4 : ts->recording_snippets.capacity * 2;
-    ts->recording_snippets.snippets = realloc(ts->recording_snippets.snippets, sizeof(input_snippet_t *) * ts->recording_snippets.capacity);
+    ts->recording_snippets.snippets = realloc(ts->recording_snippets.snippets, sizeof(snippet_t *) * ts->recording_snippets.capacity);
   }
   ts->recording_snippets.snippets[ts->recording_snippets.count++] = recording_target;
 }
@@ -616,13 +616,13 @@ void interaction_trim_recording_snippet(timeline_state_t *ts) {
     if (track->recording_snippet_count == 0) continue;
 
     for (int j = 0; j < track->recording_snippet_count; ++j) {
-      input_snippet_t *rec = &track->recording_snippets[j];
+      snippet_t *rec = &track->recording_snippets[j];
       if (!rec) continue;
 
       int trim_to = ts->current_tick;
       if (trim_to < rec->start_tick) {
-        model_free_snippet_inputs(rec);
-        memmove(&track->recording_snippets[j], &track->recording_snippets[j + 1], (track->recording_snippet_count - j - 1) * sizeof(input_snippet_t));
+        model_free_snippet(rec);
+        memmove(&track->recording_snippets[j], &track->recording_snippets[j + 1], (track->recording_snippet_count - j - 1) * sizeof(snippet_t));
         track->recording_snippet_count--;
         j--;
         continue;
@@ -630,12 +630,12 @@ void interaction_trim_recording_snippet(timeline_state_t *ts) {
 
       int new_duration = trim_to - rec->start_tick;
       if (new_duration < rec->input_count) {
-        model_resize_snippet_inputs(ts, rec, new_duration);
+        model_resize_snippet(ts, rec, new_duration);
       }
 
       if (rec->input_count <= 0) {
-        model_free_snippet_inputs(rec);
-        memmove(&track->recording_snippets[j], &track->recording_snippets[j + 1], (track->recording_snippet_count - j - 1) * sizeof(input_snippet_t));
+        model_free_snippet(rec);
+        memmove(&track->recording_snippets[j], &track->recording_snippets[j + 1], (track->recording_snippet_count - j - 1) * sizeof(snippet_t));
         track->recording_snippet_count--;
         j--;
       }
@@ -650,7 +650,7 @@ void interaction_trim_recording_snippet(timeline_state_t *ts) {
     bool should_record = (i == ts->selected_player_track_index) || track->is_dummy;
     if (!should_record && track->recording_snippet_count == 0) continue;
 
-    input_snippet_t *target = NULL;
+    snippet_t *target = NULL;
 
     for (int j = 0; j < track->recording_snippet_count; ++j) {
       if (track->recording_snippets[j].end_tick == ts->current_tick) {
@@ -664,7 +664,7 @@ void interaction_trim_recording_snippet(timeline_state_t *ts) {
     } else {
       if (ts->recording_snippets.count >= ts->recording_snippets.capacity) {
         ts->recording_snippets.capacity = ts->recording_snippets.capacity == 0 ? 4 : ts->recording_snippets.capacity * 2;
-        ts->recording_snippets.snippets = realloc(ts->recording_snippets.snippets, sizeof(input_snippet_t *) * ts->recording_snippets.capacity);
+        ts->recording_snippets.snippets = realloc(ts->recording_snippets.snippets, sizeof(snippet_t *) * ts->recording_snippets.capacity);
       }
       ts->recording_snippets.snippets[ts->recording_snippets.count++] = target;
     }

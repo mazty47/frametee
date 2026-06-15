@@ -37,6 +37,7 @@ void physics_tick(physics_handler_t *h) {
 }
 
 void physics_free(physics_handler_t *h) {
+  if (!h->loaded) return;
   tg_destroy(&h->grid);
   wc_free(&h->world);
   free_collision(&h->collision);

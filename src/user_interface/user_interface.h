@@ -65,6 +65,7 @@ struct ui_handler_t {
   bool show_fps;
   bool weapons[NUM_WEAPONS];
   bool selecting_override_pos;
+  bool show_welcome_screen;
 };
 
 void on_camera_update(struct gfx_handler_t *handler, bool hovered);

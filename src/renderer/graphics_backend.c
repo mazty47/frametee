@@ -547,6 +547,8 @@ void on_map_load_path(gfx_handler_t *handler, const char *map_path) {
 }
 
 void on_map_load_mem(struct gfx_handler_t *handler, const unsigned char *map_buffer, size_t size) {
+  timeline_cleanup(&handler->user_interface.timeline);
+  timeline_init(&handler->user_interface);
   physics_free(&handler->physics_handler);
   physics_init_from_memory(&handler->physics_handler, map_buffer, size);
   if (!handler->physics_handler.collision.m_MapData.game_layer.data) {

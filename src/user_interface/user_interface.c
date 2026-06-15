@@ -43,7 +43,7 @@ void render_menu_bar(ui_handler_t *ui) {
     if (igBeginMenu("File", true)) {
       if (igMenuItem_Bool("Open Map", NULL, false, true)) {
         nfdu8char_t *out_path;
-        nfdu8filteritem_t filters[] = {{"map files", "map"}};
+        nfdu8filteritem_t filters[] = {{"DDNet map", "map"}};
         nfdopendialogu8args_t args = {0};
         args.filterList = filters;
         args.filterCount = 1;
@@ -51,8 +51,26 @@ void render_menu_bar(ui_handler_t *ui) {
         if (result == NFD_OKAY) {
           on_map_load_path(ui->gfx_handler, out_path);
           NFD_FreePathU8(out_path);
-        } else if (result == NFD_CANCEL) log_warn(LOG_SOURCE, "Canceled map load.");
-        else log_error(LOG_SOURCE, "Error: %s", NFD_GetError());
+        } else if (result == NFD_ERROR) log_error(LOG_SOURCE, "Error: %s", NFD_GetError());
+      }
+      if (igMenuItem_Bool("Open Demo...", NULL, false, true)) {
+        nfdu8char_t *out_path;
+        nfdu8filteritem_t filters[] = {{"DDNet Demo", "demo"}};
+        nfdopendialogu8args_t args = {0};
+        args.filterList = filters;
+        args.filterCount = 1;
+        nfdresult_t result = NFD_OpenDialogU8_With(&out_path, &args);
+        if (result == NFD_OKAY) {
+          int ret = import_demo(ui, out_path);
+          if (ret == 0) {
+            log_info(LOG_SOURCE, "Demo opened successfully from '%s'", out_path);
+          } else {
+            log_error(LOG_SOURCE, "Failed to open demo from '%s'", out_path);
+          }
+          NFD_FreePathU8(out_path);
+        } else if (result == NFD_ERROR) {
+          log_error(LOG_SOURCE, "Error: %s", NFD_GetError());
+        }
       }
       igSeparator();
       if (igMenuItem_Bool("Open Project", "Ctrl+O", false, true)) {
@@ -416,6 +434,7 @@ void ui_init(ui_handler_t *ui, gfx_handler_t *gfx_handler) {
   ui->gfx_handler = gfx_handler;
   ui->show_timeline = true;
   ui->show_prediction = true;
+  ui->show_welcome_screen = true;
   ui->prediction_length = 100;
   ui->show_skin_browser = false;
   ui->show_net_events_window = false;
@@ -438,7 +457,6 @@ void ui_init(ui_handler_t *ui, gfx_handler_t *gfx_handler) {
   ui->plugin_context.is_headless = g_is_headless;
   plugin_manager_init(&ui->plugin_manager, &ui->plugin_context, &ui->plugin_api);
   plugin_manager_load_all(&ui->plugin_manager, "plugins");
-
 
   ui->num_pickups = 0;
   ui->pickups = NULL;
@@ -616,7 +634,7 @@ void render_players(ui_handler_t *ui) {
       {
         vec2 __ = {vgetx(prev_core->m_HookPos) / 32.f, vgety(prev_core->m_HookPos) / 32.f};
         vec2 _ = {vgetx(core->m_HookPos) / 32.f, vgety(core->m_HookPos) / 32.f};
-        if (core->m_HookedPlayer != -1) {
+        if (core->m_HookedPlayer != -1 && core->m_HookedPlayer >= 0 && core->m_HookedPlayer < world.m_NumCharacters) {
           SCharacterCore *hooked = &world.m_pCharacters[core->m_HookedPlayer];
           __[0] = vgetx(hooked->m_PrevPos) / 32.f;
           __[1] = vgety(hooked->m_PrevPos) / 32.f;
@@ -910,6 +928,16 @@ void render_players(ui_handler_t *ui) {
 
     for (int i = 0; i < world.m_NumCharacters; ++i) {
       SCharacterCore *core = &world.m_pCharacters[i];
+      SCharacterCore demo_core;
+      // If a demo character snippet exists for this future tick, use its recorded position instead of the simulated one
+      if (model_get_character_at_tick(&ui->timeline, i, world.m_GameTick, &demo_core)) {
+        world.m_pCharacters[i] = demo_core;
+        world.m_pCharacters[i].m_pWorld = &world;
+        world.m_pCharacters[i].m_pCollision = world.m_pCollision;
+        world.m_pCharacters[i].m_pTuning = &world.m_pTunings[0];
+        cc_calc_indices(&world.m_pCharacters[i]);
+      }
+      
       vec2 pp = {vgetx(core->m_PrevPos) / 32.f, vgety(core->m_PrevPos) / 32.f};
       vec2 p = {vgetx(core->m_Pos) / 32.f, vgety(core->m_Pos) / 32.f};
       vec4 color = {[3] = ui->prediction_alpha[i != ui->timeline.selected_player_track_index]};
@@ -1026,6 +1054,134 @@ void render_cursor(ui_handler_t *ui) {
   }
 }
 
+static void render_welcome_screen(ui_handler_t *ui) {
+  ImGuiIO *io = igGetIO_Nil();
+  ImVec2 display_size = io->DisplaySize;
+  float scale = gfx_get_ui_scale();
+
+  igSetNextWindowPos((ImVec2){display_size.x * 0.5f, display_size.y * 0.5f}, ImGuiCond_Always, (ImVec2){0.5f, 0.5f});
+  igSetNextWindowSize((ImVec2){800 * scale, 500 * scale}, ImGuiCond_Always);
+
+  if (!igIsPopupOpen_Str("Welcome to FrameTee", 0)) {
+    igOpenPopup_Str("Welcome to FrameTee", 0);
+  }
+
+  ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings;
+  if (igBeginPopupModal("Welcome to FrameTee", NULL, flags)) {
+    // --- Header ---
+    igPushFont(ui->font, 32.0f * scale);
+    igTextColored((ImVec4){0.4f, 0.7f, 1.0f, 1.0f}, "FrameTee");
+    igPopFont();
+    
+    igPushFont(ui->font, 14.0f * scale);
+    igTextDisabled("The DDNet TAS Toolkit");
+    igPopFont();
+    
+    igSpacing();
+    igSeparator();
+    igSpacing();
+    igSpacing();
+
+    // --- Body ---
+    if (igBeginTable("WelcomeTable", 2, ImGuiTableFlags_None, (ImVec2){0, 0}, 0.0f)) {
+      igTableSetupColumn("Get Started", ImGuiTableColumnFlags_WidthFixed, 350 * scale, 0);
+      igTableSetupColumn("Recent", ImGuiTableColumnFlags_WidthStretch, 0, 0);
+      igTableNextRow(0, 0);
+
+      // --- Left Column: Get Started ---
+      igTableSetColumnIndex(0);
+      igPushFont(ui->font, 20.0f * scale);
+      igText("Get Started");
+      igPopFont();
+      igSpacing();
+      igSpacing();
+
+      ImVec2 button_size = {-1, 54 * scale};
+      
+      igPushStyleVar_Vec2(ImGuiStyleVar_FramePadding, (ImVec2){10 * scale, 10 * scale});
+
+      if (igButton(ICON_KI_PLUS "  New Project from Map", button_size)) {
+        nfdu8char_t *out_path;
+        nfdu8filteritem_t filters[] = {{"DDNet map", "map"}};
+        nfdopendialogu8args_t args = {0};
+        args.filterList = filters;
+        args.filterCount = 1;
+        nfdresult_t result = NFD_OpenDialogU8_With(&out_path, &args);
+        if (result == NFD_OKAY) {
+          on_map_load_path(ui->gfx_handler, out_path);
+          NFD_FreePathU8(out_path);
+          ui->show_welcome_screen = false;
+        }
+      }
+      
+      igSpacing();
+      
+      if (igButton(ICON_KI_MOVIE "  New from DDNet Demo", button_size)) {
+        nfdu8char_t *out_path;
+        nfdu8filteritem_t filters[] = {{"DDNet Demo", "demo"}};
+        nfdopendialogu8args_t args = {0};
+        args.filterList = filters;
+        args.filterCount = 1;
+        nfdresult_t result = NFD_OpenDialogU8_With(&out_path, &args);
+        if (result == NFD_OKAY) {
+          int ret = import_demo(ui, out_path);
+          if (ret == 0) {
+            ui->show_welcome_screen = false;
+          }
+          NFD_FreePathU8(out_path);
+        }
+      }
+      
+      igSpacing();
+      
+      if (igButton(ICON_KI_EXTERNAL "  Open Existing Project", button_size)) {
+        nfdu8char_t *out_path;
+        nfdu8filteritem_t filters[] = {{"TAS Project", "tasp"}};
+        nfdopendialogu8args_t args = {0};
+        args.filterList = filters;
+        args.filterCount = 1;
+        nfdresult_t result = NFD_OpenDialogU8_With(&out_path, &args);
+        if (result == NFD_OKAY) {
+          load_project(ui, out_path);
+          NFD_FreePathU8(out_path);
+          ui->show_welcome_screen = false;
+        }
+      }
+
+      igPopStyleVar(1);
+
+      // --- Right Column: Recent ---
+      igTableSetColumnIndex(1);
+      igPushFont(ui->font, 20.0f * scale);
+      igText("Recent Projects");
+      igPopFont();
+      igSpacing();
+      igSpacing();
+
+      igBeginChild_Str("RecentList", (ImVec2){0, -50 * scale}, true, ImGuiWindowFlags_None);
+      igPushStyleColor_Vec4(ImGuiCol_Text, (ImVec4){0.6f, 0.6f, 0.6f, 1.0f});
+      igSetCursorPos((ImVec2){100 * scale, 150 * scale});
+      igText(ICON_KI_INFO_CIRCLE "  No recent projects found.");
+      igPopStyleColor(1);
+      igEndChild();
+
+      igEndTable();
+    }
+
+    // --- Footer ---
+    igSeparator();
+    igSpacing();
+    
+    ImVec2 exit_size = {150 * scale, 32 * scale};
+    igSetCursorPosY(igGetWindowHeight() - 42 * scale);
+    if (igButton("Exit Application", exit_size)) {
+      glfwSetWindowShouldClose(ui->gfx_handler->window, true);
+    }
+
+    igEndPopup();
+  }
+}
+
 void ui_render(ui_handler_t *ui) {
   process_net_events(ui);
   interaction_update_recording_input(ui);
@@ -1052,6 +1208,10 @@ void ui_render(ui_handler_t *ui) {
   undo_manager_render_history_window(&ui->undo_manager);
   if (ui->show_skin_browser) render_skin_browser(ui->gfx_handler);
   render_net_events_window(ui);
+
+  if (ui->show_welcome_screen) {
+    render_welcome_screen(ui);
+  }
 }
 
 // render viewport and related things

@@ -1,19 +1,23 @@
 #include "demo.h"
-#include <system/fs.h>
 #include "ddnet_physics/vmath.h"
 #include "nfd.h"
+#include "net_events.h"
 #include "timeline/timeline_model.h"
+#include "user_interface/timeline/timeline_types.h"
 #include <ddnet_physics/collision.h>
 #include <ddnet_physics/gamecore.h>
 #include <logger/logger.h>
 #include <renderer/graphics_backend.h>
 #include <stdio.h>
 #include <string.h>
+#include <system/fs.h>
 
 #define DDNET_DEMO_IMPLEMENTATION
 #include <ddnet_demo/ddnet_demo.h>
 
 static const char *LOG_SOURCE = "DemoExport";
+
+// ... (SHA-256 implementation remains same) ...
 
 // SHA-256 Implementation
 // Necessary for creating a valid demo header
@@ -168,6 +172,26 @@ void str_to_ints(int *pInts, size_t NumInts, const char *pStr) {
     pInts[i] = ((aBuf[0] + 128) << 24) | ((aBuf[1] + 128) << 16) | ((aBuf[2] + 128) << 8) | (aBuf[3] + 128);
   }
   pInts[NumInts - 1] &= 0xFFFFFF00;
+}
+
+static void ints_to_str(const int *pInts, size_t NumInts, char *pStr, size_t MaxLength) {
+  size_t p = 0;
+  for (size_t i = 0; i < NumInts; i++) {
+    int val = pInts[i];
+    char aBuf[4];
+    aBuf[0] = ((val >> 24) & 0xFF) - 128;
+    aBuf[1] = ((val >> 16) & 0xFF) - 128;
+    aBuf[2] = ((val >> 8) & 0xFF) - 128;
+    aBuf[3] = (val & 0xFF) - 128;
+    for (size_t c = 0; c < 4; c++) {
+      if (p < MaxLength - 1) {
+        pStr[p++] = aBuf[c];
+        if (aBuf[c] == '\0') break; // Early exit on null terminator
+      }
+    }
+    if (p > 0 && pStr[p - 1] == '\0') break;
+  }
+  pStr[MaxLength - 1] = '\0';
 }
 
 int round_to_int(float f) {
@@ -465,6 +489,403 @@ static void snap_world(dd_snapshot_builder *sb, timeline_state_t *ts, SWorldCore
   }
 }
 
+int import_demo(ui_handler_t *ui, const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (!f) return -1;
+  dd_demo_reader *dr = demo_r_create();
+  if (!demo_r_open(dr, f)) {
+    demo_r_destroy(&dr);
+    fclose(f);
+    return -1;
+  }
+
+  dd_demo_info *info = demo_r_get_info(dr);
+  if (info->map_size > 0) {
+    long map_pos = ftell(f) - info->map_size;
+    unsigned char *map_buf = malloc(info->map_size);
+    fseek(f, map_pos, SEEK_SET);
+    if (fread(map_buf, 1, info->map_size, f) == info->map_size) {
+      on_map_load_mem(ui->gfx_handler, map_buf, info->map_size);
+    }
+    // Do not free map_buf here, physics_handler takes ownership and will free it in physics_free.
+    fseek(f, map_pos + info->map_size, SEEK_SET);
+
+    // Enable Dead Reckoning using the map we just loaded
+    dd_phys_tuning tuning;
+    dd_phys_init_tuning(&tuning);
+    demo_r_enable_phys(dr, NULL, &tuning);
+    dr->track_phys = false;
+  }
+
+  SCharacterCore *states[64] = {0};
+  SPlayerInput *inputs[64] = {0};
+  int counts_char[64] = {0};
+  int counts_input[64] = {0};
+  int caps[64] = {0};
+  int max_tick = 0;
+  int first_tick = -1;
+  char player_names[64][16] = {0};
+
+  dd_demo_chunk chunk;
+  uint8_t unpacked_snap[DD_SNAPSHOT_MAX_SIZE];
+
+  int last_processed_norm_tick = -1;
+  while (demo_r_next_chunk(dr, &chunk)) {
+    if (first_tick == -1) first_tick = chunk.tick;
+    int norm_tick = chunk.tick - first_tick;
+
+    const dd_snapshot *current_snap = NULL;
+    if (chunk.type == DD_CHUNK_SNAP) {
+      current_snap = (const dd_snapshot *)chunk.data;
+    } else if (chunk.type == DD_CHUNK_SNAP_DELTA) {
+      int unpacked_size = demo_r_unpack_delta(dr, chunk.data, unpacked_snap);
+      if (unpacked_size > 0) current_snap = (const dd_snapshot *)unpacked_snap;
+    }
+
+    if (chunk.type == DD_CHUNK_SNAP || chunk.type == DD_CHUNK_SNAP_DELTA || chunk.type == DD_CHUNK_TICK_MARKER) {
+      if (last_processed_norm_tick == -1) last_processed_norm_tick = norm_tick - 1;
+
+      while (last_processed_norm_tick < norm_tick) {
+        last_processed_norm_tick++;
+        int actual_tick = last_processed_norm_tick + first_tick;
+        if (last_processed_norm_tick > max_tick) max_tick = last_processed_norm_tick;
+
+        // Propagate inputs to physics players for this tick
+        for (int cid = 0; cid < 64; ++cid) {
+          if (dr->phys.last_base_tick[cid] != -1) {
+            // Allocate memory if capacity exceeded
+            if (last_processed_norm_tick >= caps[cid]) {
+              int old_cap = caps[cid];
+              caps[cid] = (last_processed_norm_tick + 1) * 2;
+              if (caps[cid] < 128) caps[cid] = 128;
+              states[cid] = realloc(states[cid], caps[cid] * sizeof(SCharacterCore));
+              memset(states[cid] + old_cap, 0, (caps[cid] - old_cap) * sizeof(SCharacterCore));
+              inputs[cid] = realloc(inputs[cid], caps[cid] * sizeof(SPlayerInput));
+              memset(inputs[cid] + old_cap, 0, (caps[cid] - old_cap) * sizeof(SPlayerInput));
+            }
+
+            if (last_processed_norm_tick > 0) {
+              inputs[cid][last_processed_norm_tick] = inputs[cid][last_processed_norm_tick - 1];
+            }
+
+            // Write input to the physics simulation core
+            SPlayerInput *inp = &inputs[cid][last_processed_norm_tick];
+            dr->phys.players[cid].input.m_Direction = inp->m_Direction;
+            dr->phys.players[cid].input.m_TargetX = inp->m_TargetX;
+            dr->phys.players[cid].input.m_TargetY = inp->m_TargetY;
+            dr->phys.players[cid].input.m_Jump = inp->m_Jump;
+            dr->phys.players[cid].input.m_Fire = inp->m_Fire;
+            dr->phys.players[cid].input.m_Hook = inp->m_Hook;
+            dr->phys.players[cid].input.m_PlayerFlags = inp->m_Flags;
+            dr->phys.players[cid].input.m_WantedWeapon = inp->m_WantedWeapon;
+            dr->phys.players[cid].input.m_NextWeapon = 0;
+            dr->phys.players[cid].input.m_PrevWeapon = 0;
+          }
+        }
+
+        dd_demo_phys_advance_to(&dr->phys, actual_tick, &dr->tuning, &dr->map);
+        dr->current_tick = actual_tick;
+        uint8_t phys_snap_buf[DD_SNAPSHOT_MAX_SIZE];
+        int snap_size = demo_r_get_phys_snap(dr, phys_snap_buf);
+        if (snap_size > 0) {
+          const dd_snapshot *phys_snap = (const dd_snapshot *)phys_snap_buf;
+          for (int i = 0; i < phys_snap->num_items; i++) {
+            const dd_snap_item *item = dd_snap_get_item(phys_snap, i);
+            int item_type = dd_snap_item_type(item);
+            int cid = dd_snap_item_id(item);
+            if (cid >= 0 && cid < 64) {
+              if (last_processed_norm_tick >= caps[cid]) {
+                int old_cap = caps[cid];
+                caps[cid] = (last_processed_norm_tick + 1) * 2;
+                if (caps[cid] < 128) caps[cid] = 128;
+                states[cid] = realloc(states[cid], caps[cid] * sizeof(SCharacterCore));
+                memset(states[cid] + old_cap, 0, (caps[cid] - old_cap) * sizeof(SCharacterCore));
+                inputs[cid] = realloc(inputs[cid], caps[cid] * sizeof(SPlayerInput));
+                memset(inputs[cid] + old_cap, 0, (caps[cid] - old_cap) * sizeof(SPlayerInput));
+              }
+
+              if (item_type == DD_NETOBJTYPE_CHARACTER) {
+                const dd_netobj_character *character = (const dd_netobj_character *)dd_snap_item_data(item);
+
+                SCharacterCore *c = &states[cid][last_processed_norm_tick];
+                if (last_processed_norm_tick > 0) {
+                  *c = states[cid][last_processed_norm_tick - 1];
+                } else {
+                  memset(c, 0, sizeof(SCharacterCore));
+                }
+
+                c->m_Pos = vec2_init(character->core.m_X + MAP_EXPAND32, character->core.m_Y + MAP_EXPAND32);
+                c->m_Vel = vec2_init(character->core.m_VelX / 256.0f, character->core.m_VelY / 256.0f);
+                c->m_HookPos = vec2_init(character->core.m_HookX + MAP_EXPAND32, character->core.m_HookY + MAP_EXPAND32);
+                c->m_HookDir = vec2_init(character->core.m_HookDx / 256.0f, character->core.m_HookDy / 256.0f);
+                c->m_HookState = character->core.m_HookState;
+                c->m_HookTick = character->core.m_HookTick;
+                c->m_HookedPlayer = character->core.m_HookedPlayer;
+                c->m_Jumped = character->core.m_Jumped;
+                
+                // Copy additional fields from the physics state in dr->phys.players[cid]
+                c->m_Jumps = dr->phys.players[cid].jumps;
+                c->m_JumpedTotal = dr->phys.players[cid].jumped_total;
+                c->m_Solo = dr->phys.players[cid].solo;
+                c->m_Jetpack = dr->phys.players[cid].jetpack;
+                c->m_CollisionDisabled = dr->phys.players[cid].collision_disabled;
+                c->m_EndlessHook = dr->phys.players[cid].endless_hook;
+                c->m_EndlessJump = dr->phys.players[cid].endless_jump;
+
+                float angle_rad = character->core.m_Angle / 256.0f;
+                int tx = (int)(cosf(angle_rad) * 100.0f);
+                int ty = (int)(sinf(angle_rad) * 100.0f);
+
+                // Update the actual inputs array used by the snippet editor
+                SPlayerInput *inp = &inputs[cid][last_processed_norm_tick];
+                inp->m_Direction = character->core.m_Direction;
+                inp->m_TargetX = tx;
+                inp->m_TargetY = ty;
+                inp->m_Hook = character->core.m_HookState != 0;
+
+                c->m_Input = *inp;
+
+                counts_char[cid] = last_processed_norm_tick + 1;
+                counts_input[cid] = last_processed_norm_tick + 1;
+              }
+            }
+          }
+        }
+      }
+
+      if (current_snap) {
+        // Update physics with actual data for this tick
+        dd_demo_phys_update(&dr->phys, current_snap, chunk.tick, &dr->tuning, &dr->map);
+
+        for (int i = 0; i < current_snap->num_items; i++) {
+          const dd_snap_item *item = dd_snap_get_item(current_snap, i);
+          int item_type = dd_snap_item_type(item);
+          int cid = dd_snap_item_id(item);
+          if (cid >= 0 && cid < 64) {
+            if (last_processed_norm_tick >= caps[cid]) {
+              int old_cap = caps[cid];
+              caps[cid] = (last_processed_norm_tick + 1) * 2;
+              if (caps[cid] < 128) caps[cid] = 128;
+              states[cid] = realloc(states[cid], caps[cid] * sizeof(SCharacterCore));
+              memset(states[cid] + old_cap, 0, (caps[cid] - old_cap) * sizeof(SCharacterCore));
+              inputs[cid] = realloc(inputs[cid], caps[cid] * sizeof(SPlayerInput));
+              memset(inputs[cid] + old_cap, 0, (caps[cid] - old_cap) * sizeof(SPlayerInput));
+            }
+
+            if (item_type == DD_NETOBJTYPE_CLIENTINFO) {
+              const dd_netobj_client_info *ci = (const dd_netobj_client_info *)dd_snap_item_data(item);
+              ints_to_str(ci->m_aName, 4, player_names[cid], 16);
+            } else if (item_type == DD_NETOBJTYPE_CHARACTER) {
+              const dd_netobj_character *char_real = (const dd_netobj_character *)dd_snap_item_data(item);
+              SCharacterCore *c = &states[cid][last_processed_norm_tick];
+              SPlayerInput *inp = &inputs[cid][last_processed_norm_tick];
+              c->m_ActiveWeapon = char_real->m_Weapon;
+              c->m_AttackTick = char_real->m_AttackTick;
+              inp->m_WantedWeapon = char_real->m_Weapon;
+              
+              inp->m_Direction = char_real->core.m_Direction;
+              inp->m_Hook = char_real->core.m_HookState != 0;
+              
+              float angle_rad = char_real->core.m_Angle / 256.0f;
+              inp->m_TargetX = (int)(cosf(angle_rad) * 100.0f);
+              inp->m_TargetY = (int)(sinf(angle_rad) * 100.0f);
+              
+              if (last_processed_norm_tick > 0) {
+                if (char_real->core.m_Jumped != states[cid][last_processed_norm_tick - 1].m_Jumped && char_real->core.m_Jumped > 0) {
+                  inp->m_Jump = 1;
+                } else {
+                  inp->m_Jump = 0;
+                }
+              }
+              
+              if (char_real->m_PlayerFlags & 1) set_flag_sit(inp, 1);
+              else set_flag_sit(inp, 0);
+              c->m_Input = *inp;
+            } else if (item_type == DD_NETOBJTYPE_DDNETCHARACTER) {
+              const dd_netobj_ddnet_character *ddc = (const dd_netobj_ddnet_character *)dd_snap_item_data(item);
+              SCharacterCore *c = &states[cid][last_processed_norm_tick];
+              c->m_Jumps = ddc->m_Jumps;
+              c->m_JumpedTotal = ddc->m_JumpedTotal;
+              c->m_TeleCheckpoint = ddc->m_TeleCheckpoint;
+            } else if (item_type == DD_NETOBJTYPE_PLAYERINPUT) {
+              const dd_netobj_player_input *pi = (const dd_netobj_player_input *)dd_snap_item_data(item);
+              SPlayerInput *inp = &inputs[cid][last_processed_norm_tick];
+              inp->m_Direction = pi->m_Direction;
+              inp->m_TargetX = pi->m_TargetX;
+              inp->m_TargetY = pi->m_TargetY;
+              inp->m_Jump = pi->m_Jump;
+              inp->m_Fire = pi->m_Fire;
+              inp->m_Hook = pi->m_Hook;
+              inp->m_WantedWeapon = pi->m_WantedWeapon;
+
+              // Also copy to the physics player input so it's initialized correctly for the next tick!
+              dr->phys.players[cid].input.m_Direction = pi->m_Direction;
+              dr->phys.players[cid].input.m_TargetX = pi->m_TargetX;
+              dr->phys.players[cid].input.m_TargetY = pi->m_TargetY;
+              dr->phys.players[cid].input.m_Jump = pi->m_Jump;
+              dr->phys.players[cid].input.m_Fire = pi->m_Fire;
+              dr->phys.players[cid].input.m_Hook = pi->m_Hook;
+              dr->phys.players[cid].input.m_PlayerFlags = pi->m_PlayerFlags;
+              dr->phys.players[cid].input.m_WantedWeapon = pi->m_WantedWeapon;
+              dr->phys.players[cid].input.m_NextWeapon = pi->m_NextWeapon;
+              dr->phys.players[cid].input.m_PrevWeapon = pi->m_PrevWeapon;
+
+              // Update CharacterCore input too
+              SCharacterCore *c = &states[cid][last_processed_norm_tick];
+              c->m_Input = *inp;
+
+              counts_input[cid] = last_processed_norm_tick + 1;
+            }
+          }
+        }
+      }
+    } else if (chunk.type == DD_CHUNK_MSG) {
+      const uint8_t *p_data = chunk.data;
+      const uint8_t *p_end = chunk.data + chunk.size;
+      int msg_info;
+      p_data = dd_variable_int_unpack(p_data, &msg_info, p_end - p_data);
+      if (p_data) {
+        int msg_type = msg_info >> 1;
+        bool is_sys = msg_info & 1;
+
+        if (!is_sys) {
+          net_event_t ev = {0};
+          ev.tick = norm_tick;
+
+          if (msg_type == DD_NETMSGTYPE_SV_CHAT) {
+            ev.type = NET_EVENT_CHAT;
+            p_data = dd_variable_int_unpack(p_data, &ev.team, p_end - p_data);
+            p_data = dd_variable_int_unpack(p_data, &ev.client_id, p_end - p_data);
+            if (p_data) {
+              strncpy(ev.message, (const char *)p_data, sizeof(ev.message) - 1);
+            }
+            net_events_add(&ui->timeline, ev);
+          } else if (msg_type == DD_NETMSGTYPE_SV_KILLMSG) {
+            ev.type = NET_EVENT_KILLMSG;
+            p_data = dd_variable_int_unpack(p_data, &ev.killer, p_end - p_data);
+            p_data = dd_variable_int_unpack(p_data, &ev.victim, p_end - p_data);
+            p_data = dd_variable_int_unpack(p_data, &ev.weapon, p_end - p_data);
+            p_data = dd_variable_int_unpack(p_data, &ev.mode_special, p_end - p_data);
+            net_events_add(&ui->timeline, ev);
+          } else if (msg_type == DD_NETMSGTYPE_SV_SOUNDGLOBAL) {
+            ev.type = NET_EVENT_SOUND_GLOBAL;
+            p_data = dd_variable_int_unpack(p_data, &ev.sound_id, p_end - p_data);
+            net_events_add(&ui->timeline, ev);
+          }
+        }
+      }
+    }
+  }
+
+  demo_r_destroy(&dr);
+  fclose(f);
+
+  net_events_sort(&ui->timeline);
+
+  int tracks_to_add = 0;
+  for (int cid = 0; cid < 64; ++cid) {
+    int max_count = counts_char[cid] > counts_input[cid] ? counts_char[cid] : counts_input[cid];
+    if (max_count > 0 && cid >= tracks_to_add) tracks_to_add = cid + 1;
+  }
+
+  if (tracks_to_add > 0) {
+    model_add_new_track(&ui->timeline, &ui->gfx_handler->physics_handler, tracks_to_add);
+  }
+
+  int tracks_added = 0;
+  for (int cid = 0; cid < 64; ++cid) {
+    int max_count = counts_char[cid] > counts_input[cid] ? counts_char[cid] : counts_input[cid];
+    if (max_count > 0) {
+      player_track_t *track = &ui->timeline.player_tracks[cid];
+      if (max_tick >= caps[cid]) {
+        int old_cap = caps[cid];
+        caps[cid] = max_tick + 1;
+        states[cid] = realloc(states[cid], caps[cid] * sizeof(SCharacterCore));
+        memset(states[cid] + old_cap, 0, (caps[cid] - old_cap) * sizeof(SCharacterCore));
+        inputs[cid] = realloc(inputs[cid], caps[cid] * sizeof(SPlayerInput));
+        memset(inputs[cid] + old_cap, 0, (caps[cid] - old_cap) * sizeof(SPlayerInput));
+      }
+      for (int fill = counts_char[cid]; fill <= max_tick; ++fill) {
+        if (fill > 0) states[cid][fill] = states[cid][fill - 1];
+        else memset(&states[cid][fill], 0, sizeof(SCharacterCore));
+      }
+      for (int fill = counts_input[cid]; fill <= max_tick; ++fill) {
+        if (fill > 0) inputs[cid][fill] = inputs[cid][fill - 1];
+        else memset(&inputs[cid][fill], 0, sizeof(SPlayerInput));
+      }
+      
+      // Interpolate TargetX and TargetY for smooth visualization
+      int first_valid_tick = 0;
+      while (first_valid_tick <= max_tick && vgetx(states[cid][first_valid_tick].m_Pos) == 0 && vgety(states[cid][first_valid_tick].m_Pos) == 0) {
+        first_valid_tick++;
+      }
+      
+      int last_change_tick = first_valid_tick;
+      for (int t = first_valid_tick + 1; t <= max_tick; ++t) {
+        if (inputs[cid][t].m_TargetX != inputs[cid][last_change_tick].m_TargetX ||
+            inputs[cid][t].m_TargetY != inputs[cid][last_change_tick].m_TargetY) {
+          int steps = t - last_change_tick;
+          float start_x = inputs[cid][last_change_tick].m_TargetX;
+          float start_y = inputs[cid][last_change_tick].m_TargetY;
+          float end_x = inputs[cid][t].m_TargetX;
+          float end_y = inputs[cid][t].m_TargetY;
+          
+          for (int i = 1; i < steps; ++i) {
+            float t_lerp = (float)i / steps;
+            inputs[cid][last_change_tick + i].m_TargetX = (int)(start_x + (end_x - start_x) * t_lerp);
+            inputs[cid][last_change_tick + i].m_TargetY = (int)(start_y + (end_y - start_y) * t_lerp);
+            states[cid][last_change_tick + i].m_Input.m_TargetX = inputs[cid][last_change_tick + i].m_TargetX;
+            states[cid][last_change_tick + i].m_Input.m_TargetY = inputs[cid][last_change_tick + i].m_TargetY;
+          }
+          last_change_tick = t;
+        }
+      }
+
+      // Ensure m_PrevPos is correctly set for visual intra-tick interpolation
+      states[cid][0].m_PrevPos = states[cid][0].m_Pos;
+      for (int fill = 1; fill <= max_tick; ++fill) {
+        states[cid][fill].m_PrevPos = states[cid][fill - 1].m_Pos;
+      }
+
+      track->demo_data.states = states[cid];
+      track->demo_data.num_states = max_tick + 1;
+
+      snippet_t snippet = {0};
+      snippet.id = ui->timeline.next_snippet_id++;
+      snippet.type = SNIPPET_TYPE_CHARACTER;
+      snippet.start_tick = 0;
+      snippet.end_tick = max_tick + 1;
+      snippet.layer = 0;
+      snippet.is_active = true;
+      snippet.character_count = max_tick + 1;
+      snippet.characters = states[cid];
+      snippet.input_count = max_tick + 1;
+      snippet.inputs = inputs[cid];
+      model_insert_snippet_into_track(track, &snippet);
+      
+      states[cid] = NULL;
+      inputs[cid] = NULL;
+
+      if (player_names[cid][0] != '\0') {
+        strncpy(track->player_info.name, player_names[cid], sizeof(track->player_info.name) - 1);
+      } else {
+        snprintf(track->player_info.name, sizeof(track->player_info.name), "Demo %d", cid);
+      }
+
+      tracks_added++;
+    } else {
+      if (states[cid]) free(states[cid]);
+      if (inputs[cid]) free(inputs[cid]);
+    }
+  }
+
+  if (tracks_added > 0) {
+    ui->timeline.selected_player_track_index = 0;
+  }
+
+  return tracks_added > 0 ? 0 : -1;
+}
+
 int export_to_demo(ui_handler_t *ui, const char *path, const char *map_name, int ticks) {
   // set up demo things
   void *map_data = ui->gfx_handler->physics_handler.collision.m_MapData._map_file_data;
@@ -501,14 +922,52 @@ int export_to_demo(ui_handler_t *ui, const char *path, const char *map_name, int
 
   for (int t = 0; t < ticks; ++t) {
     demo_sb_clear(sb);
+
+    // Apply character states from snippets before ticking (initial state for this frame)
+    bool all_demo = true;
     for (int i = 0; i < cur.m_NumCharacters; ++i) {
-      SPlayerInput input = model_get_input_at_tick(&ui->timeline, i, cur.m_GameTick);
-      cc_on_input(&cur.m_pCharacters[i], &input);
+      SCharacterCore char_state;
+      if (!model_get_character_at_tick(&ui->timeline, i, cur.m_GameTick + 1, &char_state)) {
+        all_demo = false;
+        break;
+      }
     }
+
+    if (all_demo) {
+      cur.m_GameTick++;
+      for (int i = 0; i < cur.m_NumCharacters; ++i) {
+        SCharacterCore char_state;
+        model_get_character_at_tick(&ui->timeline, i, cur.m_GameTick, &char_state);
+        cur.m_pCharacters[i] = char_state;
+        cur.m_pCharacters[i].m_pWorld = &cur;
+        cur.m_pCharacters[i].m_pCollision = cur.m_pCollision;
+        cur.m_pCharacters[i].m_pTuning = &cur.m_pTunings[0];
+        cc_calc_indices(&cur.m_pCharacters[i]);
+      }
+    } else {
+      for (int i = 0; i < cur.m_NumCharacters; ++i) {
+        SPlayerInput input = model_get_input_at_tick(&ui->timeline, i, cur.m_GameTick);
+        cc_on_input(&cur.m_pCharacters[i], &input);
+      }
+
+      wc_tick(&cur);
+
+      // Apply character states again after ticking (to ensure the snapshot contains the exact truth)
+      for (int i = 0; i < cur.m_NumCharacters; ++i) {
+        SCharacterCore char_state;
+        if (model_get_character_at_tick(&ui->timeline, i, cur.m_GameTick, &char_state)) {
+          cur.m_pCharacters[i] = char_state;
+          cur.m_pCharacters[i].m_pWorld = &cur;
+          cur.m_pCharacters[i].m_pCollision = cur.m_pCollision;
+          cur.m_pCharacters[i].m_pTuning = &cur.m_pTunings[0];
+          cc_calc_indices(&cur.m_pCharacters[i]);
+        }
+      }
+    }
+
     snap_world(sb, &ui->timeline, &prev, &cur);
     wc_copy_world(&prev, &cur);
     ui->demo_exporter.num_hammerhits = 0;
-    wc_tick(&cur);
 
     int snap_size = demo_sb_finish(sb, snap_buf);
     if (snap_size > 0) demo_w_write_snap(writer, t, snap_buf, snap_size);
