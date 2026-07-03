@@ -54,18 +54,22 @@ int renderer_screen_y_to_track_index(const timeline_state_t *ts, ImRect timeline
 
 void renderer_draw_controls(timeline_state_t *ts) {
   float dpi_scale = gfx_get_ui_scale();
-  igPushItemWidth(100 * dpi_scale);
-  if (igDragInt("Current Tick", &ts->current_tick, 1, 0, 100000, "%d", ImGuiSliderFlags_None)) {
+  float btn_gap = 6.0f * dpi_scale;
+
+  igPushItemWidth(80 * dpi_scale);
+  if (igDragInt("##CurrentTick", &ts->current_tick, 1, 0, 100000, "Tick %d", ImGuiSliderFlags_None)) {
     if (ts->current_tick < 0) ts->current_tick = 0;
   }
   igPopItemWidth();
 
-  igSameLine(0, 8 * dpi_scale);
+  igSameLine(0, 10 * dpi_scale);
   if (ui_icon_button(ts->ui, ICON_FA_BACKWARD_STEP, (ImVec2){30 * dpi_scale, 0})) ts->current_tick = 0;
-  igSameLine(0, 4 * dpi_scale);
+
+  igSameLine(0, btn_gap);
   if (ui_icon_button(ts->ui, ICON_FA_BACKWARD, (ImVec2){30 * dpi_scale, 0})) model_advance_tick(ts, -ts->playback_speed);
-  igSameLine(0, 4 * dpi_scale);
-  if (ui_icon_button(ts->ui, ts->is_playing ? ICON_FA_PAUSE : ICON_FA_PLAY, (ImVec2){50 * dpi_scale, 0})) {
+
+  igSameLine(0, btn_gap);
+  if (ui_icon_button(ts->ui, ts->is_playing ? ICON_FA_PAUSE : ICON_FA_PLAY, (ImVec2){45 * dpi_scale, 0})) {
     ts->is_playing = !ts->is_playing;
     if (ts->is_playing) {
       if (ts->recording && ts->recording_snippets.count > 0) {
@@ -75,34 +79,34 @@ void renderer_draw_controls(timeline_state_t *ts) {
       ts->last_update_time = igGetTime();
     }
   }
-  igSameLine(0, 4 * dpi_scale);
+
+  igSameLine(0, btn_gap);
   if (ui_icon_button(ts->ui, ICON_FA_FORWARD, (ImVec2){30 * dpi_scale, 0})) model_advance_tick(ts, ts->playback_speed);
-  igSameLine(0, 4 * dpi_scale);
+
+  igSameLine(0, btn_gap);
   if (ui_icon_button(ts->ui, ICON_FA_FORWARD_STEP, (ImVec2){30 * dpi_scale, 0})) {
     ts->current_tick = model_get_max_timeline_tick(ts);
   }
 
-  igSameLine(0, 20 * dpi_scale);
-  igText("Zoom:");
+  igSameLine(0, 12 * dpi_scale);
+  igText("Zoom");
   igSameLine(0, 4 * dpi_scale);
-  igSetNextItemWidth(150 * dpi_scale);
+  igSetNextItemWidth(75 * dpi_scale);
   igSliderFloat("##Zoom", &ts->zoom, MIN_TIMELINE_ZOOM, MAX_TIMELINE_ZOOM, "%.2f", ImGuiSliderFlags_Logarithmic);
 
-  igSameLine(0, 20 * dpi_scale);
-  igText("Playback Speed:");
+  igSameLine(0, 12 * dpi_scale);
+  igText("Speed");
   igSameLine(0, 4 * dpi_scale);
-  igSetNextItemWidth(150 * dpi_scale);
+  igSetNextItemWidth(75 * dpi_scale);
   igSliderInt("##Speed", &ts->gui_playback_speed, 1, 100, "%d", ImGuiSliderFlags_None);
 
-  igSameLine(0, 20 * dpi_scale);
+  igSameLine(0, 14 * dpi_scale);
+
   if (igButton(ts->recording ? "Stop Recording" : "Record", (ImVec2){125 * dpi_scale, 0})) {
     interaction_toggle_recording(ts);
   }
 
-  if (ts->recording) {
-    igSameLine(0, 10 * dpi_scale);
-    igTextColored((ImVec4){1.0f, 0.2f, 0.2f, 1.0f}, ICON_FA_CIRCLE);
-  }
+  if (igIsItemHovered(0)) igSetTooltip("Toggle live input recording");
 }
 
 static double choose_nice_tick_step(double pixels_per_tick, double min_label_spacing) {
@@ -188,7 +192,7 @@ void renderer_draw_header(timeline_state_t *ts, ImDrawList *draw_list, ImRect he
       if (igIsMouseHoveringRect((ImVec2){x - 4 * dpi_scale, header_bb.Max.y - 12 * dpi_scale}, (ImVec2){x + 4 * dpi_scale, header_bb.Max.y - 4 * dpi_scale}, true)) {
         igBeginTooltip();
         if (ev->type == NET_EVENT_KILLMSG) {
-          igText("KillMsg: %d killed %d with %d", ev->killer, ev->victim, ev->weapon);
+          igText("Kill: %d -> %d", ev->killer, ev->victim);
         } else {
           igText("%s: %s", ev->type == NET_EVENT_CHAT ? "Chat" : "Broadcast", ev->message);
         }

@@ -547,69 +547,25 @@ int export_to_demo(ui_handler_t *ui, const char *path, const char *map_name, int
   return 0;
 }
 
-void render_demo_window(ui_handler_t *ui) {
-  demo_exporter_t *dx = &ui->demo_exporter;
-  float dpi_scale = gfx_get_ui_scale();
+void ui_export_demo(ui_handler_t *ui) {
+  if (!ui || !ui->gfx_handler || !ui->gfx_handler->physics_handler.loaded) return;
 
-  // Center the popup on first appearance
-  ImGuiViewport *viewport = igGetMainViewport();
-  ImVec2 center;
-  ImGuiViewport_GetCenter(&center, viewport);
-  igSetNextWindowPos(center, ImGuiCond_Appearing, (ImVec2){0.5f, 0.5f});
+  const char *map_name = (ui->loaded_map_name[0] != '\0') ? ui->loaded_map_name : "unnamed_map";
+  char default_file_name[256];
+  snprintf(default_file_name, sizeof(default_file_name), "%s.demo", map_name);
 
-  if (igBeginPopupModal("Demo Export", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-    // Path
-    igText("Export Path");
-    igInputText("##Path", dx->export_path, sizeof(dx->export_path), 0, NULL, NULL);
-    igSameLine(0, 5.0f * dpi_scale);
-    if (igButton("Browse...", (ImVec2){0, 0})) {
-      nfdu8char_t *save_path;
-      nfdu8filteritem_t filters[] = {{"DDNet Demo", "demo"}};
-      nfdresult_t result = NFD_SaveDialogU8(&save_path, filters, 1, NULL, "unnamed.demo");
-      if (result == NFD_OKAY) {
-        strncpy(dx->export_path, save_path, sizeof(dx->export_path) - 1);
-        dx->export_path[sizeof(dx->export_path) - 1] = '\0'; // Ensure null termination
-        NFD_FreePathU8(save_path);
-      }
+  nfdu8char_t *save_path = NULL;
+  nfdu8filteritem_t filters[] = {{"DDNet Demo", "demo"}};
+  nfdresult_t result = NFD_SaveDialogU8(&save_path, filters, 1, NULL, default_file_name);
+
+  if (result == NFD_OKAY && save_path) {
+    int max_ticks = model_get_max_timeline_tick(&ui->timeline) + 500;
+    int res = export_to_demo(ui, save_path, map_name, max_ticks);
+    if (res == 0) {
+      log_info(LOG_SOURCE, "Demo exported successfully to '%s'", save_path);
+    } else {
+      log_error(LOG_SOURCE, "Failed to export demo to '%s'", save_path);
     }
-
-    // Map Name
-    igText("Map Name (in demo)");
-    igInputText("##MapName", dx->map_name, sizeof(dx->map_name), 0, NULL, NULL);
-
-    // Ticks
-    igText("Number of Ticks");
-    igInputInt("##Ticks", &dx->num_ticks, 1, 100, 0);
-    igSameLine(0, 5.0f * dpi_scale);
-    if (igButton("Max Ticks", (ImVec2){0, 0})) {
-      dx->num_ticks = model_get_max_timeline_tick(&ui->timeline);
-    }
-
-    igSeparator();
-    igSpacing();
-
-    if (igButton("Export", (ImVec2){120 * dpi_scale, 0})) {
-      if (strlen(dx->export_path) > 0) {
-        const char *map_name_to_use = (strlen(dx->map_name) > 0) ? dx->map_name : "unnamed_map";
-        int result = export_to_demo(ui, dx->export_path, map_name_to_use, dx->num_ticks);
-        if (result == 0) {
-          log_info(LOG_SOURCE, "Demo exported successfully to '%s'", dx->export_path);
-        } else {
-          log_error(LOG_SOURCE, "Failed to export demo to '%s'", dx->export_path);
-        }
-      } else {
-        log_warn(LOG_SOURCE, "Export path is empty. Cannot export demo.");
-      }
-      igCloseCurrentPopup();
-    }
-
-    igSetItemDefaultFocus();
-    igSameLine(0, 10.0f * dpi_scale);
-
-    if (igButton("Cancel", (ImVec2){120 * dpi_scale, 0})) {
-      igCloseCurrentPopup();
-    }
-
-    igEndPopup();
+    NFD_FreePathU8(save_path);
   }
 }

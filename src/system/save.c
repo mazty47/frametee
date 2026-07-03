@@ -63,6 +63,7 @@ bool save_project(ui_handler_t *ui, const char *path) {
   fseek(f, 0, SEEK_SET);
   memcpy(header.magic, TAS_PROJECT_FILE_MAGIC, 4);
   header.version = TAS_PROJECT_FILE_VERSION;
+  strncpy(header.map_name, ui->loaded_map_name, sizeof(header.map_name) - 1);
   fwrite(&header, sizeof(tas_project_header_t), 1, f);
 
   fclose(f);
@@ -145,22 +146,45 @@ bool load_project(ui_handler_t *ui, const char *path) {
     return false;
   }
 
-  tas_project_header_t header;
-  if (fread(&header, sizeof(tas_project_header_t), 1, f) != 1) {
+  struct {
+    char magic[4];
+    uint32_t version;
+    uint32_t map_data_size;
+    uint32_t num_skins;
+    uint32_t num_player_tracks;
+    uint32_t timeline_data_size;
+  } base_header;
+
+  if (fread(&base_header, sizeof(base_header), 1, f) != 1) {
     log_error(LOG_SOURCE, "Failed to read project header from: '%s'", path);
     fclose(f);
     return false;
   }
 
-  if (strncmp(header.magic, TAS_PROJECT_FILE_MAGIC, 4) != 0 || header.version > TAS_PROJECT_FILE_VERSION) {
+  if (strncmp(base_header.magic, TAS_PROJECT_FILE_MAGIC, 4) != 0 || base_header.version > TAS_PROJECT_FILE_VERSION) {
     log_error(LOG_SOURCE, "Invalid or unsupported TAS project file: '%s'", path);
     fclose(f);
     return false;
   }
 
+  tas_project_header_t header;
+  memset(&header, 0, sizeof(header));
+  memcpy(&header, &base_header, sizeof(base_header));
+
+  if (base_header.version >= 5) {
+    if (fread(header.map_name, sizeof(header.map_name), 1, f) == 1) {
+      strncpy(ui->loaded_map_name, header.map_name, sizeof(ui->loaded_map_name) - 1);
+      ui->loaded_map_name[sizeof(ui->loaded_map_name) - 1] = '\0';
+    }
+  } else {
+    if (ui->loaded_map_name[0] == '\0') {
+      strncpy(ui->loaded_map_name, "unnamed_map", sizeof(ui->loaded_map_name) - 1);
+    }
+  }
+
   // clean up existing state before loading
   timeline_cleanup(&ui->timeline);
-  skin_manager_free(&ui->skin_manager);
+  skin_manager_free(&ui->skin_manager, ui->gfx_handler);
   // mark all skins as unloaded directly
   memset(ui->gfx_handler->renderer.skin_manager.layer_used + 3, 0,
          MAX_SKINS - 3); // start at id 3 so we don't delete the default,ninja and spec skin

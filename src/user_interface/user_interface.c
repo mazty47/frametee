@@ -38,7 +38,6 @@
 static const char *LOG_SOURCE = "UI";
 
 void render_menu_bar(ui_handler_t *ui) {
-  bool open_export_popup = false;
   if (igBeginMainMenuBar()) {
     if (igBeginMenu("File", true)) {
       if (igMenuItem_Bool("Save Project As...", "Ctrl+S", false, true)) {
@@ -52,13 +51,7 @@ void render_menu_bar(ui_handler_t *ui) {
       }
       igSeparator();
       if (igMenuItem_Bool("Export Demo...", NULL, false, ui->gfx_handler->physics_handler.loaded)) {
-        demo_exporter_t *dx = &ui->demo_exporter;
-        // Set default values when opening the popup
-        dx->num_ticks = model_get_max_timeline_tick(&ui->timeline);
-        if (strlen(dx->map_name) == 0) {
-          strncpy(dx->map_name, "unnamed_map", sizeof(dx->map_name) - 1);
-        }
-        open_export_popup = true;
+        ui_export_demo(ui);
       }
       igEndMenu();
     }
@@ -140,9 +133,6 @@ void render_menu_bar(ui_handler_t *ui) {
     if (igButton(button_text, (ImVec2){0, 0})) plugin_manager_reload_all(&ui->plugin_manager, "plugins");
 
     igEndMainMenuBar();
-  }
-  if (open_export_popup) {
-    igOpenPopup_Str("Demo Export", ImGuiPopupFlags_AnyPopupLevel);
   }
 }
 
@@ -255,6 +245,20 @@ void render_player_manager(ui_handler_t *ui) {
         ts->selected_player_track_index = i;
       }
 
+      if (igBeginPopupContextItem("##track_context", ImGuiPopupFlags_MouseButtonRight)) {
+        ts->selected_player_track_index = i;
+        if (igMenuItem_Bool(ICON_FA_TRASH " Delete Player Track", NULL, false, true)) {
+          if (g_remove_confirm_needed && ts->player_tracks[i].snippet_count > 0) {
+            g_pending_remove_index = i;
+            igOpenPopup_Str("Confirm remove player", ImGuiPopupFlags_AnyPopupLevel);
+          } else {
+            undo_command_t *cmd = commands_create_remove_track(ui, i);
+            undo_manager_register_command(&ui->undo_manager, cmd);
+          }
+        }
+        igEndPopup();
+      }
+
       if (i < world.m_NumCharacters && world.m_pCharacters[i].m_FinishTick > 0) {
         int ticks = world.m_pCharacters[i].m_FinishTick - world.m_pCharacters[i].m_StartTick;
         float time = (float)ticks / 50.f;
@@ -264,20 +268,6 @@ void render_player_manager(ui_handler_t *ui) {
         igTextDisabled("%02d:%05.2f", m, s);
       }
 
-      ImVec2 vMin;
-      igGetContentRegionAvail(&vMin);
-      igSameLine(vMin.x - 20.f * gfx_get_ui_scale(), -1.0f); // shift right
-      if (ui_icon_button(ui, ICON_FA_TRASH, (ImVec2){0, 0})) {
-        if (g_remove_confirm_needed && ts->player_tracks[i].snippet_count > 0) {
-          g_pending_remove_index = i;
-          igPopID();
-          igOpenPopup_Str("Confirm remove player", ImGuiPopupFlags_AnyPopupLevel);
-          igPushID_Int(i);
-        } else {
-          undo_command_t *cmd = commands_create_remove_track(ui, i);
-          undo_manager_register_command(&ui->undo_manager, cmd);
-        }
-      }
       igPopID();
     }
     wc_free(&world);
@@ -452,6 +442,7 @@ void ui_init(ui_handler_t *ui, gfx_handler_t *gfx_handler) {
   ui_apply_theme();
 
   ui->gfx_handler = gfx_handler;
+  strncpy(ui->loaded_map_name, "unnamed_map", sizeof(ui->loaded_map_name) - 1);
   ui->show_timeline = true;
   ui->show_prediction = true;
   ui->prediction_length = 100;
@@ -1218,9 +1209,6 @@ void ui_render(ui_handler_t *ui) {
     if (ui->timeline.selected_player_track_index != -1) render_player_info(ui->gfx_handler);
   }
 
-  // Render the demo window/popup logic
-  render_demo_window(ui);
-
   keybinds_render_settings_window(ui);
   undo_manager_render_history_window(&ui->undo_manager);
   if (ui->show_skin_browser) render_skin_browser(ui->gfx_handler);
@@ -1418,7 +1406,8 @@ void ui_cleanup(ui_handler_t *ui) {
   particle_system_cleanup(&ui->particle_system);
   timeline_cleanup(&ui->timeline);
   undo_manager_cleanup(&ui->undo_manager);
-  skin_manager_free(&ui->skin_manager);
+  skin_manager_free(&ui->skin_manager, ui->gfx_handler);
+  skin_browser_cleanup(ui->gfx_handler);
   extern bool g_is_headless;
   if (!g_is_headless) {
     NFD_Quit();
@@ -1451,16 +1440,24 @@ bool ui_icon_button(ui_handler_t *ui, const char *icon, ImVec2 size) {
   ImU32 col = igGetColorU32_Col(col_idx, 1.0f);
   igRenderFrame(bb.Min, bb.Max, col, true, style->FrameRounding);
 
-  // Measure icon text size
   ImFont *font = (ui && ui->icon_font) ? ui->icon_font : igGetFont();
-  float font_size = igGetFontSize();
 
   if (ui && ui->icon_font) {
     igPushFont(ui->icon_font, 0.0f);
   }
 
+  float font_size = igGetFontSize();
+  float max_font_size = size.y * 0.55f;
+  if (font_size > max_font_size) {
+    font_size = max_font_size;
+  }
+
   ImVec2 text_size;
-  igCalcTextSize(&text_size, icon, NULL, false, -1.0f);
+  if (font) {
+    ImFont_CalcTextSizeA(&text_size, font, font_size, 3.402823466e+38F, -1.0f, icon, NULL, NULL);
+  } else {
+    igCalcTextSize(&text_size, icon, NULL, false, -1.0f);
+  }
 
   if (ui && ui->icon_font) {
     igPopFont();
@@ -1468,7 +1465,7 @@ bool ui_icon_button(ui_handler_t *ui, const char *icon, ImVec2 size) {
 
   // Calculate top-left for AddText so icon text center matches button frame center
   ImVec2 center = {(bb.Min.x + bb.Max.x) * 0.5f, (bb.Min.y + bb.Max.y) * 0.5f};
-  ImVec2 text_pos = {center.x - text_size.x * 0.5f, center.y - text_size.y * 0.5f};
+  ImVec2 text_pos = {floorf(center.x - text_size.x * 0.5f), floorf(center.y - text_size.y * 0.5f)};
 
   ImDrawList_AddText_FontPtr(
       igGetWindowDrawList(),

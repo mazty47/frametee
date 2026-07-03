@@ -38,5 +38,5 @@ void render_player_info(struct gfx_handler_t *h);
 void skin_manager_init(skin_manager_t *m);
 int skin_manager_add(skin_manager_t *m, const skin_info_t *skin);
 int skin_manager_remove(skin_manager_t *m, struct gfx_handler_t *h, int index);
-void skin_manager_free(skin_manager_t *m);
+void skin_manager_free(skin_manager_t *m, struct gfx_handler_t *h);
 #endif // PLAYER_INFO_H

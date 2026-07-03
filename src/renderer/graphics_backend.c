@@ -531,7 +531,27 @@ void on_map_load(gfx_handler_t *handler) {
   wc_copy_world(&handler->user_interface.timeline.previous_world, &handler->physics_handler.world);
 }
 
+static void extract_map_name(const char *path, char *out_name, size_t out_size) {
+  if (!path || !out_name || out_size == 0) return;
+  const char *filename = strrchr(path, '/');
+#ifdef _WIN32
+  const char *win_slash = strrchr(path, '\\');
+  if (win_slash && (!filename || win_slash > filename)) filename = win_slash;
+#endif
+  if (filename) filename++;
+  else filename = path;
+
+  strncpy(out_name, filename, out_size - 1);
+  out_name[out_size - 1] = '\0';
+
+  char *dot = strrchr(out_name, '.');
+  if (dot && dot != out_name) {
+    *dot = '\0';
+  }
+}
+
 void on_map_load_path(gfx_handler_t *handler, const char *map_path) {
+  extract_map_name(map_path, handler->user_interface.loaded_map_name, sizeof(handler->user_interface.loaded_map_name));
   timeline_cleanup(&handler->user_interface.timeline);
   timeline_init(&handler->user_interface);
   physics_free(&handler->physics_handler);
@@ -938,7 +958,7 @@ static void destroy_offscreen_resources(gfx_handler_t *handler) {
     handler->offscreen_memory = VK_NULL_HANDLE;
   }
 
-  ImTextureRef_destroy(handler->offscreen_texture);
+  destroy_imgui_texture_ref(&handler->offscreen_texture);
   handler->offscreen_initialized = false;
   handler->offscreen_width = 0;
   handler->offscreen_height = 0;
@@ -1122,8 +1142,12 @@ static void setup_window(gfx_handler_t *handler, ImGui_ImplVulkanH_Window *wd, V
   if (handler->user_interface.vsync) {
     present_mode = VK_PRESENT_MODE_FIFO_KHR;
   }
-  VkPresentModeKHR present_modes[] = {present_mode};
-  wd->PresentMode = ImGui_ImplVulkanH_SelectPresentMode(handler->g_physical_device, wd->Surface, &present_modes[0], ARRAYSIZE(present_modes));
+  VkPresentModeKHR present_modes[] = {present_mode, VK_PRESENT_MODE_FIFO_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR};
+  VkPresentModeKHR selected_mode = ImGui_ImplVulkanH_SelectPresentMode(handler->g_physical_device, wd->Surface, present_modes, ARRAYSIZE(present_modes));
+  if ((int)selected_mode == -1) {
+    selected_mode = VK_PRESENT_MODE_FIFO_KHR;
+  }
+  wd->PresentMode = selected_mode;
 
   assert(handler->g_min_image_count >= 2);
   ImGui_ImplVulkanH_CreateOrResizeWindow(handler->g_instance, handler->g_physical_device, handler->g_device, wd, handler->g_queue_family,

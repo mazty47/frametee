@@ -278,5 +278,8 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_if_different 
         ${SHADER_OUTPUTS} 
         ${CMAKE_BINARY_DIR}/data/shaders/
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different 
+        ${SHADER_OUTPUTS} 
+        ${CMAKE_SOURCE_DIR}/data/shaders/
     COMMENT "Copying compiled shaders to build directory"
 )

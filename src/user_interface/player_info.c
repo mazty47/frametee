@@ -285,10 +285,17 @@ void skin_manager_init(skin_manager_t *m) {
   m->skins = NULL;
 }
 
-void skin_manager_free(skin_manager_t *m) {
+void skin_manager_free(skin_manager_t *m, gfx_handler_t *h) {
   if (!m) return;
   if (m->skins) {
     for (int i = 0; i < m->num_skins; i++) {
+      if (m->skins[i].preview_texture) {
+        destroy_imgui_texture_ref(&m->skins[i].preview_texture);
+      }
+      if (h && m->skins[i].preview_texture_res) {
+        renderer_destroy_texture(h, m->skins[i].preview_texture_res);
+        m->skins[i].preview_texture_res = NULL;
+      }
       if (m->skins[i].data) free(m->skins[i].data);
     }
     free(m->skins);
@@ -315,8 +322,7 @@ int skin_manager_remove(skin_manager_t *m, gfx_handler_t *h, int index) {
   // Unload from renderer and destroy preview
   renderer_unload_skin(h, m->skins[index].id);
   if (m->skins[index].preview_texture) {
-    ImTextureRef_destroy(m->skins[index].preview_texture);
-    m->skins[index].preview_texture = NULL;
+    destroy_imgui_texture_ref(&m->skins[index].preview_texture);
   }
   if (m->skins[index].preview_texture_res) {
     renderer_destroy_texture(h, m->skins[index].preview_texture_res);

@@ -91,6 +91,7 @@ void check_vk_result(VkResult err) {
   log_error("Vulkan", "VkResult = %d", err);
   if (err < 0) abort();
 }
+
 void check_vk_result_line(VkResult err, int line) {
   if (err == VK_SUCCESS) return;
   log_error("Vulkan", "VkResult = %d in renderer.c (line: %d)", err, line);

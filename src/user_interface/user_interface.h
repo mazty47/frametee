@@ -69,6 +69,7 @@ struct ui_handler_t {
 
   char recent_projects[10][1024];
   int num_recent_projects;
+  char loaded_map_name[128];
 };
 
 void on_camera_update(struct gfx_handler_t *handler, bool hovered);
@@ -84,5 +85,6 @@ void ui_post_map_load(ui_handler_t *ui);
 void ui_cleanup(ui_handler_t *ui);
 void ui_add_recent_project(ui_handler_t *ui, const char *path);
 bool ui_icon_button(ui_handler_t *ui, const char *icon, ImVec2 size);
+void ui_export_demo(ui_handler_t *ui);
 
 #endif

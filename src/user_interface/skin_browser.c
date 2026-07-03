@@ -110,10 +110,60 @@ static void scan_directory_for_skins(const char *path) {
   closedir(d);
 }
 
-static void refresh_skins() {
+static bool g_skins_initialized = false;
+static int g_skin_to_delete = -1;
+static bool g_do_not_ask_again = false;
+
+#define MAX_BROWSER_LOAD_TASKS 4
+typedef struct {
+  char path[512];
+  atomic_bool in_use;
+  atomic_bool done;
+  browser_skin_t* target;
+  texture_t* texture_res;
+  int temp_skin_id;
+  gfx_handler_t* h;
+} browser_load_task_t;
+
+static browser_load_task_t g_browser_load_tasks[MAX_BROWSER_LOAD_TASKS];
+static pthread_t g_browser_load_threads[MAX_BROWSER_LOAD_TASKS];
+
+static void* browser_load_thread(void* arg) {
+  browser_load_task_t* task = (browser_load_task_t*)arg;
+  task->temp_skin_id = renderer_load_skin_from_file(task->h, task->path, &task->texture_res);
+  task->done = true;
+  return NULL;
+}
+
+static void refresh_skins(gfx_handler_t *h) {
+  for (int i = 0; i < MAX_BROWSER_LOAD_TASKS; ++i) {
+    if (g_browser_load_tasks[i].in_use) {
+      pthread_join(g_browser_load_threads[i], NULL);
+      if (g_browser_load_tasks[i].done && g_browser_load_tasks[i].temp_skin_id >= 0) {
+        if (h && g_browser_load_tasks[i].texture_res) {
+          renderer_destroy_texture(h, g_browser_load_tasks[i].texture_res);
+        }
+        if (h) renderer_unload_skin(h, g_browser_load_tasks[i].temp_skin_id);
+      }
+      g_browser_load_tasks[i].in_use = false;
+    }
+  }
+
+  for (int i = 0; i < g_browser_skins_count; ++i) {
+    browser_skin_t *bs = &g_browser_skins[i];
+    if (bs->preview_texture) {
+      destroy_imgui_texture_ref(&bs->preview_texture);
+    }
+    if (h && bs->texture_res) {
+      renderer_destroy_texture(h, bs->texture_res);
+      bs->texture_res = NULL;
+    }
+    bs->loaded = false;
+    bs->fetching = false;
+  }
   g_browser_skins_count = 0;
 
-  char config_dir[1019];
+  char config_dir[1018];
   if (fs_get_config_dir(config_dir, sizeof(config_dir))) {
     char skins_dir[1024];
     snprintf(skins_dir, sizeof(skins_dir), "%s/skins", config_dir);
@@ -153,30 +203,36 @@ static void refresh_skins() {
 #endif
 }
 
-
-static bool g_skins_initialized = false;
-static int g_skin_to_delete = -1;
-static bool g_do_not_ask_again = false;
-
-#define MAX_BROWSER_LOAD_TASKS 4
-typedef struct {
-  char path[512];
-  atomic_bool in_use;
-  atomic_bool done;
-  browser_skin_t* target;
-  texture_t* texture_res;
-  int temp_skin_id;
-  gfx_handler_t* h;
-} browser_load_task_t;
-
-static browser_load_task_t g_browser_load_tasks[MAX_BROWSER_LOAD_TASKS];
-static pthread_t g_browser_load_threads[MAX_BROWSER_LOAD_TASKS];
-
-static void* browser_load_thread(void* arg) {
-  browser_load_task_t* task = (browser_load_task_t*)arg;
-  task->temp_skin_id = renderer_load_skin_from_file(task->h, task->path, &task->texture_res);
-  task->done = true;
-  return NULL;
+void skin_browser_cleanup(gfx_handler_t *h) {
+  for (int i = 0; i < MAX_BROWSER_LOAD_TASKS; ++i) {
+    if (g_browser_load_tasks[i].in_use) {
+      pthread_join(g_browser_load_threads[i], NULL);
+      if (g_browser_load_tasks[i].done && g_browser_load_tasks[i].temp_skin_id >= 0) {
+        if (h && g_browser_load_tasks[i].texture_res) {
+          renderer_destroy_texture(h, g_browser_load_tasks[i].texture_res);
+        }
+        if (h) renderer_unload_skin(h, g_browser_load_tasks[i].temp_skin_id);
+      }
+      g_browser_load_tasks[i].in_use = false;
+    }
+  }
+  for (int i = 0; i < g_browser_skins_count; ++i) {
+    browser_skin_t *bs = &g_browser_skins[i];
+    if (bs->preview_texture) {
+      destroy_imgui_texture_ref(&bs->preview_texture);
+    }
+    if (h && bs->texture_res) {
+      renderer_destroy_texture(h, bs->texture_res);
+      bs->texture_res = NULL;
+    }
+  }
+  if (g_browser_skins) {
+    free(g_browser_skins);
+    g_browser_skins = NULL;
+  }
+  g_browser_skins_count = 0;
+  g_browser_skins_capacity = 0;
+  g_skins_initialized = false;
 }
 
 void render_skin_browser(gfx_handler_t *h) {
@@ -189,21 +245,23 @@ void render_skin_browser(gfx_handler_t *h) {
   }
 
   if (!g_skins_initialized) {
-    refresh_skins();
+    refresh_skins(h);
     g_skins_initialized = true;
   }
 
   static char skin_name_buf[256] = "";
   ImVec2 avail;
   igGetContentRegionAvail(&avail);
+  float dpi = gfx_get_ui_scale();
   
-  float search_width = avail.x - 220.0f;
-  if (search_width < 150.0f) search_width = 150.0f;
+  float btn_width = 110.0f * dpi;
+  float search_width = avail.x - (btn_width * 2.0f + 16.0f);
+  if (search_width < 120.0f) search_width = 120.0f;
   
   igSetNextItemWidth(search_width);
   igInputTextWithHint("##skin_name", "Search / Fetch skin...", skin_name_buf, sizeof(skin_name_buf), ImGuiInputTextFlags_None, NULL, NULL);
   igSameLine(0, 8);
-  if (igButton("Fetch Skin", (ImVec2){100, 0})) {
+  if (igButton(ICON_FA_DOWNLOAD " Fetch", (ImVec2){btn_width, 0})) {
     if (strlen(skin_name_buf) > 0) {
       char skin_path[512] = {0};
       if (fetch_skin(skin_name_buf, skin_path, sizeof(skin_path))) {
@@ -228,7 +286,13 @@ void render_skin_browser(gfx_handler_t *h) {
                     info.preview_texture_res->sampler, info.preview_texture_res->image_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
                 
                 skin_manager_add(m, &info);
-                refresh_skins();
+                if (t->selected_player_track_index >= 0) {
+                  player_info_t *pi = &t->player_tracks[t->selected_player_track_index].player_info;
+                  pi->skin = info.id;
+                  strncpy(pi->skin_name, info.name, sizeof(pi->skin_name) - 1);
+                  pi->skin_name[sizeof(pi->skin_name) - 1] = '\0';
+                }
+                refresh_skins(h);
               } else {
                 free(buffer);
               }
@@ -241,17 +305,19 @@ void render_skin_browser(gfx_handler_t *h) {
       }
     }
   }
+  if (igIsItemHovered(0)) igSetTooltip("Fetch skin online by name");
 
   igSameLine(0, 8);
-  if (igButton("Refresh", (ImVec2){100, 0})) {
-    refresh_skins();
+  if (igButton(ICON_FA_ROTATE " Refresh", (ImVec2){btn_width, 0})) {
+    refresh_skins(h);
   }
+  if (igIsItemHovered(0)) igSetTooltip("Rescan local skins directories");
 
   igSeparator();
 
   igGetContentRegionAvail(&avail);
   float window_visible_x = avail.x;
-  float item_width = 110.0f;
+  float item_width = 114.0f * dpi;
   float item_spacing = 12.0f;
   int columns = (int)(window_visible_x / (item_width + item_spacing));
   if (columns < 1) columns = 1;
@@ -270,7 +336,7 @@ void render_skin_browser(gfx_handler_t *h) {
     }
   }
 
-  igPushStyleVar_Vec2(ImGuiStyleVar_CellPadding, (ImVec2){6.0f, 8.0f});
+  igPushStyleVar_Vec2(ImGuiStyleVar_CellPadding, (ImVec2){8.0f, 10.0f});
 
   if (igBeginTable("SkinGrid", columns, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_ScrollY, (ImVec2){0, 0}, 0)) {
     int rows = (filtered_count + columns - 1) / columns;
@@ -331,7 +397,7 @@ void render_skin_browser(gfx_handler_t *h) {
           igPushID_Int(skin_idx);
           ImVec2 cursor_pos;
           igGetCursorScreenPos(&cursor_pos);
-          float card_height = 94.0f;
+          float card_height = 92.0f * dpi;
           ImVec2 card_min = cursor_pos;
           ImVec2 card_max = {cursor_pos.x + item_width, cursor_pos.y + card_height};
           ImDrawList* draw_list = igGetWindowDrawList();
@@ -420,8 +486,7 @@ void render_skin_browser(gfx_handler_t *h) {
     browser_skin_t *bs = &g_browser_skins[i];
     if (bs->loaded && !bs->visible_this_frame) {
       if (bs->preview_texture) {
-        ImTextureRef_destroy(bs->preview_texture);
-        bs->preview_texture = NULL;
+        destroy_imgui_texture_ref(&bs->preview_texture);
       }
       if (bs->texture_res) {
         renderer_destroy_texture(h, bs->texture_res);

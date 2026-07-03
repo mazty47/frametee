@@ -372,6 +372,7 @@ static void render_keybind_entry(ui_handler_t *ui, keybind_manager_t *manager, a
       igPopID();
       break;
     }
+    if (igIsItemHovered(0)) igSetTooltip("Remove keybind");
 
     // Only put on same line if not the last one, wrapping handled by table or layout
     igSameLine(0, 6.0f * dpi_scale);

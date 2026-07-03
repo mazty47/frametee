@@ -20,6 +20,17 @@
 #undef GLFWwindow
 #undef GLFWmonitor
 
+static inline void destroy_imgui_texture_ref(struct ImTextureRef **tex_ref_ptr) {
+  if (tex_ref_ptr && *tex_ref_ptr) {
+    ImTextureID tex_id = ImTextureRef_GetTexID(*tex_ref_ptr);
+    if (tex_id) {
+      ImGui_ImplVulkan_RemoveTexture((VkDescriptorSet)tex_id);
+    }
+    ImTextureRef_destroy(*tex_ref_ptr);
+    *tex_ref_ptr = NULL;
+  }
+}
+
 #define GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>

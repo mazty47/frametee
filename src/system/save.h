@@ -5,7 +5,7 @@
 #include <user_interface/user_interface.h>
 
 #define TAS_PROJECT_FILE_MAGIC "TASP"
-#define TAS_PROJECT_FILE_VERSION 4
+#define TAS_PROJECT_FILE_VERSION 5
 
 // main header for the project file
 struct tas_project_header_t {
@@ -15,6 +15,7 @@ struct tas_project_header_t {
   uint32_t num_skins;
   uint32_t num_player_tracks;
   uint32_t timeline_data_size;
+  char map_name[64];
 };
 
 // header for each embedded skin
