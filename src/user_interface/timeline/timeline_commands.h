@@ -25,7 +25,7 @@ struct undo_command_t *commands_create_toggle_selected_snippets_active(ui_handle
 struct undo_command_t *commands_create_remove_track(ui_handler_t *ui, int track_index);
 
 // Special command for the snippet editor
-struct undo_command_t *create_edit_inputs_command(snippet_t *snippet, int *indices, int count, SPlayerInput *before_states,
+struct undo_command_t *create_edit_inputs_command(input_snippet_t *snippet, int *indices, int count, SPlayerInput *before_states,
                                                   SPlayerInput *after_states);
 
 // API-level commands

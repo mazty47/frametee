@@ -13,7 +13,7 @@
 #define TPS 50
 
 // Forward Declarations for Static Render Helpers
-static void render_input_snippet(timeline_state_t *ts, player_track_t *track, snippet_t *snippet, ImDrawList *draw_list, ImRect timeline_bb,
+static void render_input_snippet(timeline_state_t *ts, player_track_t *track, input_snippet_t *snippet, ImDrawList *draw_list, ImRect timeline_bb,
                                  float track_top, bool is_recording_snippet);
 static void render_player_track(timeline_state_t *ts, int track_index, ImDrawList *draw_list, ImRect timeline_bb, float track_top, float track_bottom,
                                 bool is_selected);
@@ -69,7 +69,7 @@ void renderer_draw_controls(timeline_state_t *ts) {
     ts->is_playing = !ts->is_playing;
     if (ts->is_playing) {
       if (ts->recording && ts->recording_snippets.count > 0) {
-        snippet_t *recording_snippet = ts->recording_snippets.snippets[0];
+        input_snippet_t *recording_snippet = ts->recording_snippets.snippets[0];
         if (recording_snippet) ts->current_tick = recording_snippet->end_tick;
       }
       ts->last_update_time = igGetTime();
@@ -330,7 +330,7 @@ void renderer_draw_drag_preview(timeline_state_t *ts, ImDrawList *overlay_draw_l
   int snapped_start_tick_clicked, base_track_index;
   interaction_calculate_drag_destination(ts, timeline_bb, tracks_area_scroll_y, &snapped_start_tick_clicked, &base_track_index);
 
-  snippet_t *clicked_snippet = model_find_snippet_by_id(ts, ts->drag_state.dragged_snippet_id, NULL);
+  input_snippet_t *clicked_snippet = model_find_snippet_by_id(ts, ts->drag_state.dragged_snippet_id, NULL);
   if (!clicked_snippet) return;
 
   int delta_ticks = snapped_start_tick_clicked - clicked_snippet->start_tick;
@@ -340,7 +340,7 @@ void renderer_draw_drag_preview(timeline_state_t *ts, ImDrawList *overlay_draw_l
   for (int i = 0; i < ts->drag_state.drag_info_count; ++i) {
     dragged_snippet_info_t *d_info = &ts->drag_state.drag_infos[i];
     int s_track_idx;
-    snippet_t *s = model_find_snippet_by_id(ts, d_info->snippet_id, &s_track_idx);
+    input_snippet_t *s = model_find_snippet_by_id(ts, d_info->snippet_id, &s_track_idx);
     if (!s) continue;
 
     if (s_track_idx < 256) affected_tracks[s_track_idx] = true;
@@ -370,8 +370,8 @@ void renderer_draw_drag_preview(timeline_state_t *ts, ImDrawList *overlay_draw_l
     if (hypothetical_count == 0) continue;
 
     // Create the list of hypothetical snippets and a pointer list for the solver.
-    snippet_t *hypothetical_snippets = malloc(hypothetical_count * sizeof(snippet_t));
-    snippet_t **solver_list = malloc(hypothetical_count * sizeof(snippet_t *));
+    input_snippet_t *hypothetical_snippets = malloc(hypothetical_count * sizeof(input_snippet_t));
+    input_snippet_t **solver_list = malloc(hypothetical_count * sizeof(input_snippet_t *));
     if (!hypothetical_snippets || !solver_list) {
       free(hypothetical_snippets);
       free(solver_list);
@@ -392,7 +392,7 @@ void renderer_draw_drag_preview(timeline_state_t *ts, ImDrawList *overlay_draw_l
       dragged_snippet_info_t *d_info = &ts->drag_state.drag_infos[i];
       int new_track_idx = base_track_index + d_info->track_offset;
       if (new_track_idx == track_idx) {
-        snippet_t *original = model_find_snippet_by_id(ts, d_info->snippet_id, NULL);
+        input_snippet_t *original = model_find_snippet_by_id(ts, d_info->snippet_id, NULL);
         if (original) {
           hypothetical_snippets[current_idx] = *original;
           hypothetical_snippets[current_idx].start_tick += delta_ticks;
@@ -409,12 +409,12 @@ void renderer_draw_drag_preview(timeline_state_t *ts, ImDrawList *overlay_draw_l
     // Draw the previews for the dragged snippets using the solved layout.
     ImDrawList_PushClipRect(overlay_draw_list, timeline_bb.Min, timeline_bb.Max, true);
     for (int i = 0; i < hypothetical_count; ++i) {
-      snippet_t *preview_snip = &hypothetical_snippets[i];
+      input_snippet_t *preview_snip = &hypothetical_snippets[i];
       if (interaction_is_snippet_selected(ts, preview_snip->id)) {
         // Calculate stack size for correct height, based on the hypothetical layout
         int stack_size = 0;
         for (int j = 0; j < hypothetical_count; ++j) {
-          snippet_t *other = &hypothetical_snippets[j];
+          input_snippet_t *other = &hypothetical_snippets[j];
           if (preview_snip->start_tick < other->end_tick && preview_snip->end_tick > other->start_tick) {
             if (other->layer >= stack_size) stack_size = other->layer + 1;
           }
@@ -482,7 +482,7 @@ static void render_player_track(timeline_state_t *ts, int track_index, ImDrawLis
   }
 }
 
-static void render_input_snippet(timeline_state_t *ts, player_track_t *track, snippet_t *snippet, ImDrawList *draw_list, ImRect timeline_bb,
+static void render_input_snippet(timeline_state_t *ts, player_track_t *track, input_snippet_t *snippet, ImDrawList *draw_list, ImRect timeline_bb,
                                  float track_top, bool is_recording_snippet) {
   float dpi_scale = gfx_get_ui_scale();
   float start_x = renderer_tick_to_screen_x(ts, snippet->start_tick, timeline_bb.Min.x);
@@ -500,10 +500,6 @@ static void render_input_snippet(timeline_state_t *ts, player_track_t *track, sn
   ImU32 color;
   if (is_recording_snippet) {
     color = IM_COL32(255, 30, 0, 100);
-  } else if (snippet->type == SNIPPET_TYPE_CHARACTER) {
-    color = snippet->is_active
-                ? (is_selected ? IM_COL32(100, 150, 255, 255) : IM_COL32(80, 120, 200, 200))
-                : (is_selected ? IM_COL32(60, 90, 150, 255) : IM_COL32(50, 80, 140, 200));
   } else {
     color = snippet->is_active
                 ? (is_selected ? igGetColorU32_Col(ImGuiCol_HeaderActive, 1.0f) : igGetColorU32_Col(ImGuiCol_Button, 0.8f))
