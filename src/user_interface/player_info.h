@@ -9,7 +9,10 @@
 struct player_info_t {
   char name[16];
   char clan[12];
-  int skin; // id
+  char skin_name[64];
+  int skin; // id. Managed automatically.
+  bool fetching_skin;
+  float fetching_anim_time;
   uint32_t color_body;
   uint32_t color_feet;
   bool use_custom_color;

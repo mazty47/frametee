@@ -205,6 +205,22 @@ void config_load(ui_handler_t *ui) {
     }
   }
 
+  toml_datum_t projects_settings = toml_get(res.toptab, "projects");
+  if (projects_settings.type == TOML_TABLE) {
+    toml_datum_t recents = toml_get(projects_settings, "recent");
+    if (recents.type == TOML_ARRAY) {
+      ui->num_recent_projects = 0;
+      for (int i = 0; i < recents.u.arr.size && ui->num_recent_projects < 10; ++i) {
+        toml_datum_t val = recents.u.arr.elem[i];
+        if (val.type == TOML_STRING) {
+          strncpy(ui->recent_projects[ui->num_recent_projects], val.u.str.ptr, 1023);
+          ui->recent_projects[ui->num_recent_projects][1023] = '\0';
+          ui->num_recent_projects++;
+        }
+      }
+    }
+  }
+
   toml_free(res);
   log_info(LOG_SOURCE, "Config loaded successfully from %s.", config_path);
 }
@@ -289,6 +305,13 @@ void config_save(ui_handler_t *ui) {
   fprintf(fp, "bg_color = [%.3f, %.3f, %.3f]\n", ui->bg_color[0], ui->bg_color[1], ui->bg_color[2]);
   fprintf(fp, "prediction_alpha = [%.3f, %.3f]\n", ui->prediction_alpha[0], ui->prediction_alpha[1]);
   fprintf(fp, "center_dot = %s\n", ui->center_dot ? "true" : "false");
+
+  fprintf(fp, "\n[projects]\n");
+  fprintf(fp, "recent = [\n");
+  for (int i = 0; i < ui->num_recent_projects; ++i) {
+    fprintf(fp, "  \"%s\"%s\n", ui->recent_projects[i], (i < ui->num_recent_projects - 1) ? "," : "");
+  }
+  fprintf(fp, "]\n");
 
   fclose(fp);
   log_info(LOG_SOURCE, "Config saved to %s.", config_path);

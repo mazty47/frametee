@@ -341,7 +341,7 @@ static bool has_perfect_duplicate(keybind_manager_t *kb, action_t action, key_co
 }
 
 // Render logic for a single action in the settings window
-static void render_keybind_entry(keybind_manager_t *manager, action_t action_id) {
+static void render_keybind_entry(ui_handler_t *ui, keybind_manager_t *manager, action_t action_id) {
   int count = keybinds_get_count_for_action(manager, action_id);
   float dpi_scale = gfx_get_ui_scale();
 
@@ -366,7 +366,7 @@ static void render_keybind_entry(keybind_manager_t *manager, action_t action_id)
     }
 
     igSameLine(0, 6.0f * dpi_scale);
-    if (igButton(ICON_KI_TRASH, (ImVec2){30.f * dpi_scale, 0})) {
+    if (ui_icon_button(ui, ICON_FA_TRASH, (ImVec2){30.f * dpi_scale, 0})) {
       keybinds_remove(manager, global_idx);
       // We removed an item, so we must stop iterating since indices shifted
       igPopID();
@@ -505,7 +505,7 @@ void keybinds_render_settings_window(ui_handler_t *ui) {
               igTextUnformatted(manager->action_infos[i].name, NULL);
 
               igTableSetColumnIndex(1);
-              render_keybind_entry(manager, (action_t)i);
+              render_keybind_entry(ui, manager, (action_t)i);
             }
           }
           igEndTable();

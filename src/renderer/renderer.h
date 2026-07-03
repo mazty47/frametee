@@ -60,6 +60,7 @@ struct texture_t {
   uint32_t layer_count;
   char path[256];
   uint8_t gs_org; // ddnet grayscale shit for coloring skins
+  uint32_t last_used_frame;
 };
 
 struct mesh_t {
@@ -155,6 +156,8 @@ struct skin_renderer_t {
 struct skin_atlas_manager_t {
   texture_t *atlas_array; // giant 2D array texture for all skins
   bool layer_used[MAX_SKINS];
+  uint32_t last_used_frame[MAX_SKINS];
+  uint8_t gs_org[MAX_SKINS];
 };
 
 struct sprite_definition_t {
@@ -251,7 +254,7 @@ struct renderer_state_t {
   mesh_t meshes[MAX_MESHES];
   uint32_t mesh_count;
 
-  pipeline_cache_entry_t pipeline_cache[MAX_SHADERS];
+  pipeline_cache_entry_t pipeline_cache[MAX_SHADERS][2];
 
   VkDescriptorPool frame_descriptor_pools[3];
   VkCommandPool transfer_command_pool;
@@ -311,6 +314,10 @@ void renderer_draw_map(gfx_handler_t *h);
 texture_t *renderer_create_texture_array_from_atlas(gfx_handler_t *handler, texture_t *atlas, uint32_t tile_width, uint32_t tile_height, uint32_t num_tiles_x, uint32_t num_tiles_y);
 void screen_to_world(gfx_handler_t *handler, float screen_x, float screen_y, float *world_x, float *world_y);
 void world_to_screen(gfx_handler_t *h, float wx, float wy, float *sx, float *sy);
+
+// thread synchronization
+void renderer_lock(void);
+void renderer_unlock(void);
 
 // skin rendering
 void renderer_begin_skins(gfx_handler_t *h);

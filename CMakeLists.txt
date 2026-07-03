@@ -21,6 +21,7 @@ set(SRCS
 	src/system/save.c
 	src/system/config.c
 	src/system/fs.c
+	src/system/skin/skin_fetch.c
 	src/logger/logger.c
 	src/physics/physics.c
 	src/plugins/api_impl.c
@@ -47,6 +48,7 @@ set(SRCS
 
 # find dependencies
 find_package(Vulkan REQUIRED)
+find_package(CURL REQUIRED)
 
 # Try to find an existing glfw3 installation first; fall back to fetching it if unavailable.
 find_package(glfw3 CONFIG QUIET)
@@ -134,6 +136,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     nfd
     stb
     toml
+    CURL::libcurl
     ddnet_physics
     cglm
     cimgui

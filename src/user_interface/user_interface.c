@@ -41,32 +41,6 @@ void render_menu_bar(ui_handler_t *ui) {
   bool open_export_popup = false;
   if (igBeginMainMenuBar()) {
     if (igBeginMenu("File", true)) {
-      if (igMenuItem_Bool("Open Map", NULL, false, true)) {
-        nfdu8char_t *out_path;
-        nfdu8filteritem_t filters[] = {{"map files", "map"}};
-        nfdopendialogu8args_t args = {0};
-        args.filterList = filters;
-        args.filterCount = 1;
-        nfdresult_t result = NFD_OpenDialogU8_With(&out_path, &args);
-        if (result == NFD_OKAY) {
-          on_map_load_path(ui->gfx_handler, out_path);
-          NFD_FreePathU8(out_path);
-        } else if (result == NFD_CANCEL) log_warn(LOG_SOURCE, "Canceled map load.");
-        else log_error(LOG_SOURCE, "Error: %s", NFD_GetError());
-      }
-      igSeparator();
-      if (igMenuItem_Bool("Open Project", "Ctrl+O", false, true)) {
-        nfdu8char_t *out_path;
-        nfdu8filteritem_t filters[] = {{"TAS Project", "tasp"}};
-        nfdopendialogu8args_t args = {0};
-        args.filterList = filters;
-        args.filterCount = 1;
-        nfdresult_t result = NFD_OpenDialogU8_With(&out_path, &args);
-        if (result == NFD_OKAY) {
-          load_project(ui, out_path);
-          NFD_FreePathU8(out_path);
-        }
-      }
       if (igMenuItem_Bool("Save Project As...", "Ctrl+S", false, true)) {
         nfdu8char_t *save_path;
         nfdu8filteritem_t filters[] = {{"TAS Project", "tasp"}};
@@ -217,9 +191,10 @@ void setup_docking(void) {
     ImGuiID dock_id_right = igDockBuilderSplitNode(dock_id_top, ImGuiDir_Right, 0.25f, NULL, &dock_id_center);
     dock_id_left = igDockBuilderSplitNode(dock_id_center, ImGuiDir_Left, 0.40f, NULL, &dock_id_center);
 
-    igDockBuilderDockWindow("viewport", dock_id_center);
+    igDockBuilderDockWindow("Viewport", dock_id_center);
     igDockBuilderDockWindow("Controls", dock_id_center);
     igDockBuilderDockWindow("Skin Browser", dock_id_center);
+    igDockBuilderDockWindow("Undo History", dock_id_center);
 
     igDockBuilderDockWindow("Timeline", dock_id_bottom);
 
@@ -292,7 +267,7 @@ void render_player_manager(ui_handler_t *ui) {
       ImVec2 vMin;
       igGetContentRegionAvail(&vMin);
       igSameLine(vMin.x - 20.f * gfx_get_ui_scale(), -1.0f); // shift right
-      if (igSmallButton(ICON_KI_TRASH)) {
+      if (ui_icon_button(ui, ICON_FA_TRASH, (ImVec2){0, 0})) {
         if (g_remove_confirm_needed && ts->player_tracks[i].snippet_count > 0) {
           g_pending_remove_index = i;
           igPopID();
@@ -396,6 +371,63 @@ void ui_init_config(ui_handler_t *ui) {
   config_load(ui);
 }
 
+static void ui_apply_theme() {
+  ImGuiStyle* style = igGetStyle();
+  
+  style->WindowPadding = (ImVec2){12.0f, 12.0f};
+  style->FramePadding = (ImVec2){8.0f, 4.0f};
+  style->ItemSpacing = (ImVec2){8.0f, 8.0f};
+  style->ItemInnerSpacing = (ImVec2){6.0f, 6.0f};
+  
+  style->WindowRounding = 8.0f;
+  style->ChildRounding = 4.0f;
+  style->FrameRounding = 4.0f;
+  style->ScrollbarRounding = 4.0f;
+  style->FrameBorderSize = 1.0f;
+  style->WindowBorderSize = 1.0f;
+  
+  ImVec4* colors = style->Colors;
+  
+  colors[ImGuiCol_WindowBg]       = (ImVec4){0.10f, 0.11f, 0.12f, 1.00f};
+  colors[ImGuiCol_PopupBg]        = (ImVec4){0.10f, 0.11f, 0.12f, 1.00f};
+  colors[ImGuiCol_ChildBg]        = (ImVec4){0.10f, 0.11f, 0.12f, 1.00f};
+  
+  colors[ImGuiCol_FrameBg]        = (ImVec4){0.15f, 0.16f, 0.17f, 1.00f};
+  colors[ImGuiCol_FrameBgHovered] = (ImVec4){0.20f, 0.22f, 0.23f, 1.00f};
+  colors[ImGuiCol_FrameBgActive]  = (ImVec4){0.12f, 0.13f, 0.14f, 1.00f};
+  
+  colors[ImGuiCol_Border]         = (ImVec4){0.23f, 0.25f, 0.27f, 1.00f};
+  colors[ImGuiCol_BorderShadow]   = (ImVec4){0.00f, 0.00f, 0.00f, 0.00f};
+  
+  colors[ImGuiCol_Button]         = (ImVec4){0.16f, 0.45f, 0.85f, 1.00f};
+  colors[ImGuiCol_ButtonHovered]  = (ImVec4){0.26f, 0.55f, 0.95f, 1.00f};
+  colors[ImGuiCol_ButtonActive]   = (ImVec4){0.11f, 0.35f, 0.75f, 1.00f};
+  
+  colors[ImGuiCol_Text]           = (ImVec4){0.88f, 0.89f, 0.91f, 1.00f};
+  colors[ImGuiCol_TextDisabled]   = (ImVec4){0.54f, 0.57f, 0.60f, 1.00f};
+
+  colors[ImGuiCol_TitleBg]        = (ImVec4){0.10f, 0.11f, 0.12f, 1.00f};
+  colors[ImGuiCol_TitleBgActive]  = (ImVec4){0.15f, 0.16f, 0.17f, 1.00f};
+  colors[ImGuiCol_TitleBgCollapsed]= (ImVec4){0.05f, 0.06f, 0.07f, 1.00f};
+
+  colors[ImGuiCol_Header]         = (ImVec4){0.16f, 0.45f, 0.85f, 0.50f};
+  colors[ImGuiCol_HeaderHovered]  = (ImVec4){0.16f, 0.45f, 0.85f, 0.80f};
+  colors[ImGuiCol_HeaderActive]   = (ImVec4){0.16f, 0.45f, 0.85f, 1.00f};
+
+  colors[ImGuiCol_SliderGrab]     = (ImVec4){0.16f, 0.45f, 0.85f, 1.00f};
+  colors[ImGuiCol_SliderGrabActive]= (ImVec4){0.26f, 0.55f, 0.95f, 1.00f};
+  
+  colors[ImGuiCol_CheckMark]      = (ImVec4){0.88f, 0.89f, 0.91f, 1.00f};
+
+  colors[ImGuiCol_Tab]            = (ImVec4){0.15f, 0.16f, 0.17f, 1.00f};
+  colors[ImGuiCol_TabHovered]     = (ImVec4){0.26f, 0.55f, 0.95f, 0.80f};
+  colors[ImGuiCol_TabSelected]      = (ImVec4){0.16f, 0.45f, 0.85f, 1.00f};
+  colors[ImGuiCol_TabDimmed]   = (ImVec4){0.10f, 0.11f, 0.12f, 1.00f};
+  colors[ImGuiCol_TabDimmedSelected] = (ImVec4){0.15f, 0.16f, 0.17f, 1.00f};
+  
+  colors[ImGuiCol_DockingPreview] = (ImVec4){0.16f, 0.45f, 0.85f, 0.70f};
+}
+
 void ui_init(ui_handler_t *ui, gfx_handler_t *gfx_handler) {
   ImGuiIO *io = igGetIO_Nil();
   ImFontAtlas *atlas = io->Fonts;
@@ -404,14 +436,20 @@ void ui_init(ui_handler_t *ui, gfx_handler_t *gfx_handler) {
 
   ui->font = ImFontAtlas_AddFontFromFileTTF(io->Fonts, "data/fonts/Roboto-SemiBold.ttf", 19.f * scale, NULL, NULL);
 
-  ImFontConfig *config = ImFontConfig_ImFontConfig();
-  config->MergeMode = true;
-  config->GlyphMinAdvanceX = 13.0f;
-  config->GlyphOffset = (ImVec2){0.0f, 1.0f};
+  static const ImWchar icons_ranges[] = { ICON_MIN_FA, ICON_MAX_16_FA, 0 };
+  ImFontConfig *icons_config = ImFontConfig_ImFontConfig();
+  icons_config->MergeMode = true;
+  icons_config->PixelSnapH = true;
 
-  ImFontAtlas_AddFontFromFileTTF(atlas, "data/fonts/kenney-icon-font.ttf", 14.0f * scale, config, NULL);
+  ImFontAtlas_AddFontFromFileTTF(atlas, "data/fonts/fa-solid-900.ttf", 15.0f * scale, icons_config, icons_ranges);
+  ImFontConfig_destroy(icons_config);
 
-  ImFontConfig_destroy(config);
+  ImFontConfig *icon_cfg = ImFontConfig_ImFontConfig();
+  icon_cfg->PixelSnapH = true;
+  ui->icon_font = ImFontAtlas_AddFontFromFileTTF(atlas, "data/fonts/fa-solid-900.ttf", 15.0f * scale, icon_cfg, icons_ranges);
+  ImFontConfig_destroy(icon_cfg);
+  
+  ui_apply_theme();
 
   ui->gfx_handler = gfx_handler;
   ui->show_timeline = true;
@@ -1026,10 +1064,145 @@ void render_cursor(ui_handler_t *ui) {
   }
 }
 
+void ui_add_recent_project(ui_handler_t *ui, const char *path) {
+  int found_idx = -1;
+  for (int i = 0; i < ui->num_recent_projects; i++) {
+    if (strcmp(ui->recent_projects[i], path) == 0) {
+      found_idx = i;
+      break;
+    }
+  }
+
+  if (found_idx != -1) {
+    for (int i = found_idx; i > 0; i--) {
+      strcpy(ui->recent_projects[i], ui->recent_projects[i - 1]);
+    }
+  } else {
+    if (ui->num_recent_projects < 10) {
+      ui->num_recent_projects++;
+    }
+    for (int i = ui->num_recent_projects - 1; i > 0; i--) {
+      strcpy(ui->recent_projects[i], ui->recent_projects[i - 1]);
+    }
+  }
+  strncpy(ui->recent_projects[0], path, 1023);
+  ui->recent_projects[0][1023] = '\0';
+  config_save(ui);
+}
+
+static void render_splash_screen(ui_handler_t *ui) {
+  if (!igIsPopupOpen_Str("Splash Screen", ImGuiPopupFlags_None)) {
+    igOpenPopup_Str("Splash Screen", ImGuiPopupFlags_None);
+  }
+
+  ImVec2 center;
+  ImGuiViewport *viewport = igGetMainViewport();
+  center.x = viewport->WorkPos.x + viewport->WorkSize.x * 0.5f;
+  center.y = viewport->WorkPos.y + viewport->WorkSize.y * 0.5f;
+  igSetNextWindowPos(center, ImGuiCond_Always, (ImVec2){0.5f, 0.5f});
+  
+  ImGuiWindowFlags window_flags = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings;
+
+  igPushStyleVar_Vec2(ImGuiStyleVar_WindowPadding, (ImVec2){40.0f, 40.0f});
+  igPushStyleVar_Vec2(ImGuiStyleVar_ItemSpacing, (ImVec2){8.0f, 16.0f});
+
+  if (igBeginPopupModal("Splash Screen", NULL, window_flags)) {
+    float avail_x = 350.0f; // Desired width
+
+    const char *title = "Frametee";
+    ImVec2 title_size;
+    igCalcTextSize(&title_size, title, NULL, false, -1.0f);
+    igSetCursorPosX(igGetCursorPosX() + (avail_x - title_size.x) * 0.5f);
+    
+    igText("%s", title);
+    
+    igSpacing();
+    igSeparator();
+    igSpacing();
+
+    if (igButton("Load Map (New Project)", (ImVec2){avail_x, 45})) {
+      nfdu8char_t *out_path;
+      nfdu8filteritem_t filters[] = {{"map files", "map"}};
+      nfdopendialogu8args_t args = {0};
+      args.filterList = filters;
+      args.filterCount = 1;
+      nfdresult_t result = NFD_OpenDialogU8_With(&out_path, &args);
+      if (result == NFD_OKAY) {
+        on_map_load_path(ui->gfx_handler, out_path);
+        NFD_FreePathU8(out_path);
+        igCloseCurrentPopup();
+      }
+    }
+
+    if (igButton("Load Project", (ImVec2){avail_x, 45})) {
+      nfdu8char_t *out_path;
+      nfdu8filteritem_t filters[] = {{"TAS Project", "tasp"}};
+      nfdopendialogu8args_t args = {0};
+      args.filterList = filters;
+      args.filterCount = 1;
+      nfdresult_t result = NFD_OpenDialogU8_With(&out_path, &args);
+      if (result == NFD_OKAY) {
+        load_project(ui, out_path);
+        NFD_FreePathU8(out_path);
+        igCloseCurrentPopup();
+      }
+    }
+
+    if (ui->num_recent_projects > 0) {
+      igSpacing();
+      igSpacing();
+      igSeparator();
+      igSpacing();
+      
+      const char *recent_title = "Recent Projects";
+      ImVec2 rtitle_size;
+      igCalcTextSize(&rtitle_size, recent_title, NULL, false, -1.0f);
+      igSetCursorPosX(igGetCursorPosX() + (avail_x - rtitle_size.x) * 0.5f);
+      igTextDisabled("%s", recent_title);
+      
+      igSpacing();
+
+      igPushStyleVar_Float(ImGuiStyleVar_FrameBorderSize, 1.0f);
+      igPushStyleColor_Vec4(ImGuiCol_Button, (ImVec4){0, 0, 0, 0});
+      igPushStyleVar_Vec2(ImGuiStyleVar_ButtonTextAlign, (ImVec2){0.05f, 0.5f});
+
+      for (int i = 0; i < ui->num_recent_projects; i++) {
+        const char *path = ui->recent_projects[i];
+        const char *filename = strrchr(path, '/');
+        if (!filename) filename = strrchr(path, '\\');
+        if (!filename) filename = path;
+        else filename++;
+
+        if (igButton(filename, (ImVec2){avail_x, 30})) {
+          load_project(ui, path);
+          igCloseCurrentPopup();
+        }
+        if (igIsItemHovered(ImGuiHoveredFlags_None)) {
+          if (igBeginTooltip()) {
+            igPushTextWrapPos(400.0f);
+            igTextUnformatted(path, NULL);
+            igPopTextWrapPos();
+            igEndTooltip();
+          }
+        }
+      }
+
+      igPopStyleVar(2);
+      igPopStyleColor(1);
+    }
+
+    igEndPopup();
+  }
+  
+  igPopStyleVar(2);
+}
+
 void ui_render(ui_handler_t *ui) {
   process_net_events(ui);
   interaction_update_recording_input(ui);
   render_menu_bar(ui);
+
+
 
   // render menu bar first so the plugin can add menu items
   plugin_manager_update_all(&ui->plugin_manager);
@@ -1052,6 +1225,10 @@ void ui_render(ui_handler_t *ui) {
   undo_manager_render_history_window(&ui->undo_manager);
   if (ui->show_skin_browser) render_skin_browser(ui->gfx_handler);
   render_net_events_window(ui);
+
+  if (!ui->gfx_handler->physics_handler.loaded) {
+    render_splash_screen(ui);
+  }
 }
 
 // render viewport and related things
@@ -1059,7 +1236,7 @@ bool ui_render_late(ui_handler_t *ui) {
   bool hovered = false;
   // igShowDemoWindow(NULL);
   if (ui->gfx_handler->offscreen_initialized && ui->gfx_handler->offscreen_texture != NULL) {
-    igBegin("viewport", NULL, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    igBegin("Viewport", NULL, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImVec2 start;
     igGetCursorScreenPos(&start);
 
@@ -1246,4 +1423,64 @@ void ui_cleanup(ui_handler_t *ui) {
   if (!g_is_headless) {
     NFD_Quit();
   }
+}
+
+bool ui_icon_button(ui_handler_t *ui, const char *icon, ImVec2 size) {
+  ImGuiWindow *window = igGetCurrentWindow();
+  if (window->SkipItems) return false;
+
+  ImGuiContext *g = igGetCurrentContext();
+  const ImGuiStyle *style = &g->Style;
+  const ImGuiID id = igGetID_Str(icon);
+
+  float dpi = gfx_get_ui_scale();
+  ImVec2 pos = window->DC.CursorPos;
+
+  if (size.x <= 0.0f) size.x = 30.0f * dpi;
+  if (size.y <= 0.0f) size.y = igGetFrameHeight();
+
+  const ImRect bb = {pos, {pos.x + size.x, pos.y + size.y}};
+  igItemSize_Vec2(size, style->FramePadding.y);
+  if (!igItemAdd(bb, id, NULL, 0)) return false;
+
+  bool hovered, held;
+  bool pressed = igButtonBehavior(bb, id, &hovered, &held, 0);
+
+  // Render button background & border
+  ImGuiCol col_idx = held ? ImGuiCol_ButtonActive : (hovered ? ImGuiCol_ButtonHovered : ImGuiCol_Button);
+  ImU32 col = igGetColorU32_Col(col_idx, 1.0f);
+  igRenderFrame(bb.Min, bb.Max, col, true, style->FrameRounding);
+
+  // Measure icon text size
+  ImFont *font = (ui && ui->icon_font) ? ui->icon_font : igGetFont();
+  float font_size = igGetFontSize();
+
+  if (ui && ui->icon_font) {
+    igPushFont(ui->icon_font, 0.0f);
+  }
+
+  ImVec2 text_size;
+  igCalcTextSize(&text_size, icon, NULL, false, -1.0f);
+
+  if (ui && ui->icon_font) {
+    igPopFont();
+  }
+
+  // Calculate top-left for AddText so icon text center matches button frame center
+  ImVec2 center = {(bb.Min.x + bb.Max.x) * 0.5f, (bb.Min.y + bb.Max.y) * 0.5f};
+  ImVec2 text_pos = {center.x - text_size.x * 0.5f, center.y - text_size.y * 0.5f};
+
+  ImDrawList_AddText_FontPtr(
+      igGetWindowDrawList(),
+      font,
+      font_size,
+      text_pos,
+      igGetColorU32_Col(ImGuiCol_Text, 1.0f),
+      icon,
+      NULL,
+      0.0f,
+      NULL
+  );
+
+  return pressed;
 }

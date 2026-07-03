@@ -383,19 +383,20 @@ bool gfx_end_frame(gfx_handler_t *handler) {
 
   // retire textures whose frame fences are now done
   uint32_t cur_frame = handler->g_main_window_data.FrameIndex;
+  renderer_lock();
   for (uint32_t i = 0; i < handler->retire_count;) {
     if ((cur_frame - handler->retire_textures[i].frame_index) > 2) {
-      texture_t *tex = handler->retire_textures[i].tex;
-      vkDestroySampler(handler->g_device, tex->sampler, handler->g_allocator);
-      vkDestroyImageView(handler->g_device, tex->image_view, handler->g_allocator);
-      vkDestroyImage(handler->g_device, tex->image, handler->g_allocator);
-      vkFreeMemory(handler->g_device, tex->memory, handler->g_allocator);
-      memset(tex, 0, sizeof(texture_t));
+      if (handler->retire_textures[i].sampler) vkDestroySampler(handler->g_device, handler->retire_textures[i].sampler, handler->g_allocator);
+      if (handler->retire_textures[i].image_view) vkDestroyImageView(handler->g_device, handler->retire_textures[i].image_view, handler->g_allocator);
+      if (handler->retire_textures[i].image) vkDestroyImage(handler->g_device, handler->retire_textures[i].image, handler->g_allocator);
+      if (handler->retire_textures[i].memory) vkFreeMemory(handler->g_device, handler->retire_textures[i].memory, handler->g_allocator);
+
       handler->retire_textures[i] = handler->retire_textures[--handler->retire_count];
       continue;
     }
     i++;
   }
+  renderer_unlock();
 
   // End the command buffer and submit like before.
   VkResult err = vkEndCommandBuffer(handler->current_frame_command_buffer);
@@ -621,6 +622,7 @@ static ImVec4 hex_vec4(const char *hex, float alpha) {
   return (ImVec4){(float)r / 255.0f, (float)g / 255.0f, (float)b / 255.0f, alpha};
 }
 
+/*
 void ayu_dark(void) {
   ImGuiStyle *style = igGetStyle();
 
@@ -712,6 +714,7 @@ void ayu_dark(void) {
   colors[ImGuiCol_NavWindowingHighlight] = accent_yellow;
   colors[ImGuiCol_ModalWindowDimBg] = shadow;
 }
+*/
 
 float gfx_get_ui_scale(void) {
   extern bool g_is_headless;
@@ -739,7 +742,6 @@ static int init_imgui(gfx_handler_t *handler) {
   // io->ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
   io->ConfigDpiScaleFonts = true;
   io->ConfigDpiScaleViewports = true;
-  ayu_dark();
 
   ImGuiStyle *style = igGetStyle();
   ImGuiStyle_ScaleAllSizes(style, gfx_get_ui_scale() * 0.5);

@@ -61,11 +61,11 @@ void renderer_draw_controls(timeline_state_t *ts) {
   igPopItemWidth();
 
   igSameLine(0, 8 * dpi_scale);
-  if (igButton(ICON_KI_STEP_BACKWARD, (ImVec2){30 * dpi_scale, 0})) ts->current_tick = 0;
+  if (ui_icon_button(ts->ui, ICON_FA_BACKWARD_STEP, (ImVec2){30 * dpi_scale, 0})) ts->current_tick = 0;
   igSameLine(0, 4 * dpi_scale);
-  if (igButton(ICON_KI_BACKWARD, (ImVec2){30 * dpi_scale, 0})) model_advance_tick(ts, -ts->playback_speed);
+  if (ui_icon_button(ts->ui, ICON_FA_BACKWARD, (ImVec2){30 * dpi_scale, 0})) model_advance_tick(ts, -ts->playback_speed);
   igSameLine(0, 4 * dpi_scale);
-  if (igButton(ts->is_playing ? ICON_KI_PAUSE : ICON_KI_CARET_RIGHT, (ImVec2){50 * dpi_scale, 0})) {
+  if (ui_icon_button(ts->ui, ts->is_playing ? ICON_FA_PAUSE : ICON_FA_PLAY, (ImVec2){50 * dpi_scale, 0})) {
     ts->is_playing = !ts->is_playing;
     if (ts->is_playing) {
       if (ts->recording && ts->recording_snippets.count > 0) {
@@ -76,9 +76,9 @@ void renderer_draw_controls(timeline_state_t *ts) {
     }
   }
   igSameLine(0, 4 * dpi_scale);
-  if (igButton(ICON_KI_FORWARD, (ImVec2){30 * dpi_scale, 0})) model_advance_tick(ts, ts->playback_speed);
+  if (ui_icon_button(ts->ui, ICON_FA_FORWARD, (ImVec2){30 * dpi_scale, 0})) model_advance_tick(ts, ts->playback_speed);
   igSameLine(0, 4 * dpi_scale);
-  if (igButton(ICON_KI_STEP_FORWARD, (ImVec2){30 * dpi_scale, 0})) {
+  if (ui_icon_button(ts->ui, ICON_FA_FORWARD_STEP, (ImVec2){30 * dpi_scale, 0})) {
     ts->current_tick = model_get_max_timeline_tick(ts);
   }
 
@@ -95,13 +95,13 @@ void renderer_draw_controls(timeline_state_t *ts) {
   igSliderInt("##Speed", &ts->gui_playback_speed, 1, 100, "%d", ImGuiSliderFlags_None);
 
   igSameLine(0, 20 * dpi_scale);
-  if (igButton(ts->recording ? "Stop Recording" : "Record", (ImVec2){75 * dpi_scale, 0})) {
+  if (igButton(ts->recording ? "Stop Recording" : "Record", (ImVec2){125 * dpi_scale, 0})) {
     interaction_toggle_recording(ts);
   }
 
   if (ts->recording) {
     igSameLine(0, 10 * dpi_scale);
-    igTextColored((ImVec4){1.0f, 0.2f, 0.2f, 1.0f}, ICON_KI_REC);
+    igTextColored((ImVec4){1.0f, 0.2f, 0.2f, 1.0f}, ICON_FA_CIRCLE);
   }
 }
 

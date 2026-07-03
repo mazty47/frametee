@@ -14,6 +14,7 @@
 struct ui_handler_t {
   struct gfx_handler_t *gfx_handler;
   ImFont *font;
+  ImFont *icon_font;
 
   timeline_state_t timeline;
   skin_manager_t skin_manager;
@@ -65,6 +66,9 @@ struct ui_handler_t {
   bool show_fps;
   bool weapons[NUM_WEAPONS];
   bool selecting_override_pos;
+
+  char recent_projects[10][1024];
+  int num_recent_projects;
 };
 
 void on_camera_update(struct gfx_handler_t *handler, bool hovered);
@@ -78,5 +82,7 @@ void ui_render(ui_handler_t *ui);
 bool ui_render_late(ui_handler_t *ui);
 void ui_post_map_load(ui_handler_t *ui);
 void ui_cleanup(ui_handler_t *ui);
+void ui_add_recent_project(ui_handler_t *ui, const char *path);
+bool ui_icon_button(ui_handler_t *ui, const char *icon, ImVec2 size);
 
 #endif

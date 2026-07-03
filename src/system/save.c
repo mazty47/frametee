@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <system/skin/skin_fetch.h>
 
 static const char *LOG_SOURCE = "SaveFile";
 
@@ -66,6 +67,7 @@ bool save_project(ui_handler_t *ui, const char *path) {
 
   fclose(f);
   log_info(LOG_SOURCE, "Project saved successfully to '%s'", path);
+  ui_add_recent_project(ui, path);
   return true;
 }
 
@@ -86,35 +88,16 @@ static bool write_skin_data(FILE *f, ui_handler_t *ui) {
     skin_info_t *skin_info = &sm->skins[i];
 
     if (!skin_info->data || skin_info->data_size == 0) {
-      // Try to load from path if data is missing (legacy/fallback)
-      if (strlen(skin_info->path) > 0) {
-        FILE *skin_file = fs_open(skin_info->path, "rb");
-        if (skin_file) {
-          fseek(skin_file, 0, SEEK_END);
-          long texture_size = ftell(skin_file);
-          fseek(skin_file, 0, SEEK_SET);
-          skin_info->data = malloc(texture_size);
-          if (skin_info->data) {
-            fread(skin_info->data, texture_size, 1, skin_file);
-            skin_info->data_size = texture_size;
-          }
-          fclose(skin_file);
-        }
-      }
-    }
-
-    if (!skin_info->data || skin_info->data_size == 0) {
       log_warn(LOG_SOURCE, "Skipping skin %d ('%s'): No data found.", skin_info->id, skin_info->name);
-      continue;
+      // Wait, if it has a name, we can still save it. We just don't save data anymore.
     }
 
     skin_file_header_t skin_header;
     skin_header.id = skin_info->id;
     strncpy(skin_header.name, skin_info->name, sizeof(skin_header.name) - 1);
-    skin_header.texture_data_size = skin_info->data_size;
+    skin_header.texture_data_size = 0; // We no longer save raw png data
 
     fwrite(&skin_header, sizeof(skin_file_header_t), 1, f);
-    fwrite(skin_info->data, skin_info->data_size, 1, f);
   }
   return true;
 }
@@ -217,6 +200,7 @@ bool load_project(ui_handler_t *ui, const char *path) {
 
   fclose(f);
   log_info(LOG_SOURCE, "Project loaded successfully from '%s'", path);
+  ui_add_recent_project(ui, path);
 
   model_recalc_physics(&ui->timeline, 0); // recalculate physics from the start
   return true;
@@ -247,24 +231,45 @@ static bool read_and_load_skins(FILE *f, ui_handler_t *ui, uint32_t num_skins) {
       return false;
     }
 
-    unsigned char *texture_data = malloc(skin_header.texture_data_size);
-    if (!texture_data) {
-      log_error(LOG_SOURCE, "Failed to allocate memory for skin texture %u.", i);
-      return false;
-    }
-
-    if (fread(texture_data, skin_header.texture_data_size, 1, f) != 1) {
-      log_error(LOG_SOURCE, "Failed to read skin texture data for skin %u.", i);
-      free(texture_data);
-      return false;
-    }
-
     skin_info_t info = {0};
-    int loaded_id = renderer_load_skin_from_memory(ui->gfx_handler, texture_data, skin_header.texture_data_size, &info.preview_texture_res);
+    int loaded_id = -1;
 
-    // Store the data in the info structure for future saves
-    info.data = texture_data;
-    info.data_size = skin_header.texture_data_size;
+    if (skin_header.texture_data_size > 0) {
+      unsigned char *texture_data = malloc(skin_header.texture_data_size);
+      if (texture_data) {
+        if (fread(texture_data, skin_header.texture_data_size, 1, f) == 1) {
+          loaded_id = renderer_load_skin_from_memory(ui->gfx_handler, texture_data, skin_header.texture_data_size, &info.preview_texture_res);
+          info.data = texture_data;
+          info.data_size = skin_header.texture_data_size;
+        } else {
+          free(texture_data);
+        }
+      }
+    } else {
+      // New format: texture_data_size is 0, we must fetch the skin by name
+      char skin_path[512] = {0};
+      if (fetch_skin(skin_header.name, skin_path, sizeof(skin_path))) {
+        loaded_id = renderer_load_skin_from_file(ui->gfx_handler, skin_path, &info.preview_texture_res);
+        if (loaded_id >= 0) {
+          strncpy(info.path, skin_path, sizeof(info.path) - 1);
+          // Load data into memory for skin_manager
+          FILE *f_skin = fs_open(skin_path, "rb");
+          if (f_skin) {
+            fseek(f_skin, 0, SEEK_END);
+            long sz = ftell(f_skin);
+            fseek(f_skin, 0, SEEK_SET);
+            info.data = malloc(sz);
+            if (info.data) {
+              fread(info.data, sz, 1, f_skin);
+              info.data_size = sz;
+            }
+            fclose(f_skin);
+          }
+        }
+      } else {
+        log_warn(LOG_SOURCE, "Could not fetch or load skin: %s", skin_header.name);
+      }
+    }
 
     if (loaded_id >= 0) {
       info.id = loaded_id;
@@ -274,8 +279,6 @@ static bool read_and_load_skins(FILE *f, ui_handler_t *ui, uint32_t num_skins) {
             info.preview_texture_res->sampler, info.preview_texture_res->image_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
       }
       skin_manager_add(&ui->skin_manager, &info);
-    } else {
-      free(texture_data);
     }
   }
   return true;

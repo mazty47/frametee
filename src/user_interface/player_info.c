@@ -9,6 +9,76 @@
 #include <string.h>
 #include <system/include_cimgui.h>
 #include <user_interface/timeline/timeline_model.h>
+#include <system/skin/skin_fetch.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <symbols.h>
+#include <math.h>
+
+static void draw_spinning_icon(ImVec2 center, const char* icon_text) {
+    ImVec2 text_size;
+    igCalcTextSize(&text_size, icon_text, NULL, false, -1.0f);
+    ImVec2 top_left = {center.x - text_size.x * 0.5f, center.y - text_size.y * 0.5f};
+
+    ImDrawList* draw_list = igGetWindowDrawList();
+    int vtx_start = draw_list->VtxBuffer.Size;
+    ImDrawList_AddText_Vec2(draw_list, top_left, 0xFFFFFFFF, icon_text, NULL);
+    int vtx_end = draw_list->VtxBuffer.Size;
+    
+    float angle = igGetTime() * 10.0f;
+    float cos_a = cosf(angle);
+    float sin_a = sinf(angle);
+    
+    for (int j = vtx_start; j < vtx_end; ++j) {
+        ImDrawVert* v = &draw_list->VtxBuffer.Data[j];
+        float dx = v->pos.x - center.x;
+        float dy = v->pos.y - center.y;
+        v->pos.x = center.x + (dx * cos_a - dy * sin_a);
+        v->pos.y = center.y + (dx * sin_a + dy * cos_a);
+    }
+}
+
+typedef struct {
+  char skin_name[64];
+  char fetched_path[512];
+  atomic_bool done;
+  atomic_bool success;
+  player_info_t* target;
+} skin_fetch_task_t;
+
+#define MAX_TASKS 32
+static skin_fetch_task_t g_fetch_tasks[MAX_TASKS];
+static pthread_t g_fetch_threads[MAX_TASKS];
+
+static void* fetch_skin_thread(void* arg) {
+  skin_fetch_task_t* task = (skin_fetch_task_t*)arg;
+  bool ok = fetch_skin(task->skin_name, task->fetched_path, sizeof(task->fetched_path));
+  task->success = ok;
+  task->done = true;
+  return NULL;
+}
+
+static void start_skin_fetch(player_info_t* info) {
+  info->fetching_skin = true;
+  info->fetching_anim_time = 0.0f;
+  
+  for (int i = 0; i < MAX_TASKS; ++i) {
+    if (!g_fetch_tasks[i].done && g_fetch_tasks[i].target != NULL) continue;
+    
+    // Found empty slot or completed slot
+    if (g_fetch_tasks[i].target != NULL) {
+      pthread_join(g_fetch_threads[i], NULL); // cleanup old thread
+    }
+    
+    g_fetch_tasks[i].target = info;
+    g_fetch_tasks[i].done = false;
+    g_fetch_tasks[i].success = false;
+    strncpy(g_fetch_tasks[i].skin_name, info->skin_name, sizeof(g_fetch_tasks[i].skin_name) - 1);
+    
+    pthread_create(&g_fetch_threads[i], NULL, fetch_skin_thread, &g_fetch_tasks[i]);
+    break;
+  }
+}
 
 // static const char *LOG_SOURCE = "SkinManager";
 
@@ -36,8 +106,46 @@ void render_player_info(gfx_handler_t *h) {
       igText("Finish Time: %02d:%05.2f", m, s);
     }
 
-    igInputInt("Skin Id", &player_info->skin, 1, 1, 0);
-    player_info->skin = iclamp(player_info->skin, 0, MAX_SKINS - 1);
+    bool name_changed = igInputText("Skin Name", player_info->skin_name, sizeof(player_info->skin_name), ImGuiInputTextFlags_EnterReturnsTrue, NULL, NULL);
+    if (igIsItemDeactivatedAfterEdit() || name_changed) {
+      start_skin_fetch(player_info);
+    }
+    
+    if (player_info->fetching_skin) {
+      igSameLine(0, 10.0f);
+      igText("Fetching");
+      igSameLine(0, 10.0f);
+      ImVec2 pos;
+      igGetCursorScreenPos(&pos);
+      draw_spinning_icon(pos, ICON_FA_ROTATE);
+    }
+    
+    // Check completed tasks
+    for (int i = 0; i < MAX_TASKS; ++i) {
+      if (g_fetch_tasks[i].target == player_info && g_fetch_tasks[i].done) {
+        if (g_fetch_tasks[i].success) {
+          // Load it into Vulkan!
+          texture_t* unused_preview = NULL;
+          int real_id = renderer_load_skin_from_file(h, g_fetch_tasks[i].fetched_path, &unused_preview);
+          if (real_id >= 0) {
+            skin_info_t info = {0};
+            info.id = real_id;
+            info.preview_texture_res = unused_preview;
+            if (unused_preview) {
+              info.preview_texture = ImTextureRef_ImTextureRef_TextureID((ImTextureID)ImGui_ImplVulkan_AddTexture(
+                  unused_preview->sampler, unused_preview->image_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
+            }
+            strncpy(info.name, g_fetch_tasks[i].skin_name, sizeof(info.name) - 1);
+            strncpy(info.path, g_fetch_tasks[i].fetched_path, sizeof(info.path) - 1);
+            skin_manager_add(&h->user_interface.skin_manager, &info);
+            player_info->skin = info.id;
+          }
+        }
+        player_info->fetching_skin = false;
+        g_fetch_tasks[i].target = NULL; // free slot
+        pthread_join(g_fetch_threads[i], NULL);
+      }
+    }
     igCheckbox("Use custom color", &player_info->use_custom_color);
     if (player_info->use_custom_color) {
       PackedHSLPicker("Color body", &player_info->color_body);
@@ -206,10 +314,13 @@ int skin_manager_remove(skin_manager_t *m, gfx_handler_t *h, int index) {
 
   // Unload from renderer and destroy preview
   renderer_unload_skin(h, m->skins[index].id);
+  if (m->skins[index].preview_texture) {
+    ImTextureRef_destroy(m->skins[index].preview_texture);
+    m->skins[index].preview_texture = NULL;
+  }
   if (m->skins[index].preview_texture_res) {
-    // The ImTextureID associated with this doesn't need manual cleanup,
-    // ImGui's Vulkan backend handles it when the texture is destroyed.
     renderer_destroy_texture(h, m->skins[index].preview_texture_res);
+    m->skins[index].preview_texture_res = NULL;
   }
   if (m->skins[index].data) {
     free(m->skins[index].data);

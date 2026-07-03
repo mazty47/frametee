@@ -1,10 +1,33 @@
 #include "renderer.h"
+#include <animation/anim_data.h>
+#include <animation/anim_system.h>
 #include <system/fs.h>
 #include "graphics_backend.h"
 #include <cglm/cglm.h>
 #include <logger/logger.h>
 #include <stdint.h>
 #include <vulkan/vulkan_core.h>
+#include <pthread.h>
+
+static pthread_mutex_t g_vulkan_mutex;
+static pthread_once_t g_vulkan_mutex_once = PTHREAD_ONCE_INIT;
+
+static void init_vulkan_mutex(void) {
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_vulkan_mutex, &attr);
+    pthread_mutexattr_destroy(&attr);
+}
+
+void renderer_lock(void) {
+    pthread_once(&g_vulkan_mutex_once, init_vulkan_mutex);
+    pthread_mutex_lock(&g_vulkan_mutex);
+}
+
+void renderer_unlock(void) {
+    pthread_mutex_unlock(&g_vulkan_mutex);
+}
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -138,14 +161,19 @@ static void end_single_time_commands(gfx_handler_t *handler, VkCommandPool pool,
   VkResult err = vkCreateFence(handler->g_device, &fence_info, handler->g_allocator, &fence);
   check_vk_result_line(err, __LINE__);
 
+  renderer_lock();
   err = vkQueueSubmit(handler->g_queue, 1, &submit_info, fence);
+  renderer_unlock();
   check_vk_result_line(err, __LINE__);
 
   err = vkWaitForFences(handler->g_device, 1, &fence, VK_TRUE, UINT64_MAX);
   check_vk_result_line(err, __LINE__);
 
   vkDestroyFence(handler->g_device, fence, handler->g_allocator);
+
+  renderer_lock();
   vkFreeCommandBuffers(handler->g_device, pool, 1, &command_buffer);
+  renderer_unlock();
 }
 
 static void copy_buffer(gfx_handler_t *handler, VkCommandPool pool, VkBuffer src_buffer, VkBuffer dst_buffer, VkDeviceSize size) {
@@ -177,34 +205,58 @@ static void transition_image_layout(gfx_handler_t *handler, VkCommandPool pool, 
   VkPipelineStageFlags source_stage;
   VkPipelineStageFlags destination_stage;
 
-  if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED && new_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-    barrier.srcAccessMask = 0;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    source_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    destination_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-  } else if (old_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    source_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    destination_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-  } else if (old_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && new_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
-    barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    source_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    destination_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-  } else if (old_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && new_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-    barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    source_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    destination_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-  } else if (old_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    source_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    destination_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-  } else {
-    log_error(LOG_SOURCE, "Unsupported image layout transition requested!");
-    abort();
+  switch (old_layout) {
+    case VK_IMAGE_LAYOUT_UNDEFINED:
+      barrier.srcAccessMask = 0;
+      source_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+      break;
+    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+      barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      source_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+      break;
+    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+      barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+      source_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+      break;
+    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+      barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+      source_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+      break;
+    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+      barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+      source_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+      break;
+    default:
+      barrier.srcAccessMask = 0;
+      source_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+      break;
+  }
+
+  switch (new_layout) {
+    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+      barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      destination_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+      break;
+    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+      barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+      destination_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+      break;
+    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+      barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+      destination_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+      break;
+    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+      barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+      destination_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+      break;
+    case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+      barrier.dstAccessMask = 0;
+      destination_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+      break;
+    default:
+      barrier.dstAccessMask = 0;
+      destination_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+      break;
   }
 
   vkCmdPipelineBarrier(command_buffer, source_stage, destination_stage, 0, 0, NULL, 0, NULL, 1, &barrier);
@@ -614,11 +666,13 @@ void renderer_cleanup(gfx_handler_t *handler) {
   vkDeviceWaitIdle(device);
 
   for (uint32_t i = 0; i < MAX_SHADERS; ++i) {
-    pipeline_cache_entry_t *entry = &renderer->pipeline_cache[i];
+    for (uint32_t j = 0; j < 2; j++) {
+      pipeline_cache_entry_t *entry = &renderer->pipeline_cache[i][j];
     if (entry->initialized) {
       vkDestroyPipeline(device, entry->pipeline, allocator);
       vkDestroyPipelineLayout(device, entry->pipeline_layout, allocator);
       vkDestroyDescriptorSetLayout(device, entry->descriptor_set_layout, allocator);
+    }
     }
   }
 
@@ -685,12 +739,11 @@ void renderer_cleanup(gfx_handler_t *handler) {
   log_info(LOG_SOURCE, "Renderer cleaned up successfully.");
 }
 
-static pipeline_cache_entry_t *get_or_create_pipeline(gfx_handler_t *handler, shader_t *shader, uint32_t ubo_count, uint32_t texture_count) {
+static pipeline_cache_entry_t *get_or_create_pipeline(gfx_handler_t *handler, shader_t *shader, uint32_t ubo_count, uint32_t texture_count, VkRenderPass target_render_pass) {
+  if (!shader) return NULL;
   renderer_state_t *renderer = &handler->renderer;
-  pipeline_cache_entry_t *entry = &renderer->pipeline_cache[shader->id];
-
-  VkRenderPass target_render_pass =
-      handler->offscreen_render_pass != VK_NULL_HANDLE ? handler->offscreen_render_pass : handler->g_main_window_data.RenderPass;
+  int rp_idx = (target_render_pass == handler->offscreen_render_pass) ? 1 : 0;
+pipeline_cache_entry_t *entry = &renderer->pipeline_cache[shader->id][rp_idx];
 
   if (entry->initialized && entry->ubo_count == ubo_count && entry->texture_count == texture_count && entry->render_pass == target_render_pass) {
     return entry;
@@ -1091,8 +1144,12 @@ texture_t *renderer_load_texture(gfx_handler_t *handler, const char *image_path)
 }
 
 texture_t *renderer_create_texture_from_rgba(gfx_handler_t *handler, const unsigned char *pixels, int width, int height) {
+  renderer_lock();
   renderer_state_t *renderer = &handler->renderer;
-  if (!pixels) return NULL;
+  if (!pixels) {
+    renderer_unlock();
+    return NULL;
+  }
 
   uint32_t free_slot = (uint32_t)-1;
   for (uint32_t i = 0; i < MAX_TEXTURES; ++i) {
@@ -1103,7 +1160,23 @@ texture_t *renderer_create_texture_from_rgba(gfx_handler_t *handler, const unsig
   }
 
   if (free_slot == (uint32_t)-1) {
+    uint32_t oldest_frame = (uint32_t)-1;
+    int oldest_slot = -1;
+    for (uint32_t i = 0; i < MAX_TEXTURES; ++i) {
+      if (renderer->textures[i].active && renderer->textures[i].last_used_frame < oldest_frame) {
+        oldest_frame = renderer->textures[i].last_used_frame;
+        oldest_slot = (int)i;
+      }
+    }
+    if (oldest_slot != -1) {
+      renderer_destroy_texture(handler, &renderer->textures[oldest_slot]);
+      free_slot = (uint32_t)oldest_slot;
+    }
+  }
+
+  if (free_slot == (uint32_t)-1) {
     log_error(LOG_SOURCE, "Max texture count (%d) reached.", MAX_TEXTURES);
+    renderer_unlock();
     return NULL;
   }
 
@@ -1113,6 +1186,7 @@ texture_t *renderer_create_texture_from_rgba(gfx_handler_t *handler, const unsig
   memset(texture, 0, sizeof(texture_t));
   texture->id = free_slot;
   texture->active = true;
+  texture->last_used_frame = handler->g_main_window_data.FrameIndex;
   texture->width = width;
   texture->height = height;
   texture->mip_levels = 1; // No mipmaps for previews
@@ -1129,7 +1203,7 @@ texture_t *renderer_create_texture_from_rgba(gfx_handler_t *handler, const unsig
   vkUnmapMemory(handler->g_device, staging_buffer.memory);
 
   create_image(handler, width, height, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
-               VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &texture->image, &texture->memory);
+               VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &texture->image, &texture->memory);
   transition_image_layout(handler, renderer->transfer_command_pool, texture->image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED,
                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, 0, 1);
   copy_buffer_to_image(handler, renderer->transfer_command_pool, staging_buffer.buffer, texture->image, width, height);
@@ -1141,6 +1215,7 @@ texture_t *renderer_create_texture_from_rgba(gfx_handler_t *handler, const unsig
 
   texture->image_view = create_image_view(handler, texture->image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_VIEW_TYPE_2D, 1, 1);
   texture->sampler = create_texture_sampler(handler, 1, VK_FILTER_LINEAR);
+  renderer_unlock();
   return texture;
 }
 
@@ -1223,7 +1298,7 @@ void renderer_draw_mesh(gfx_handler_t *handler, VkCommandBuffer command_buffer, 
   if (!mesh || !shader || !mesh->active || !shader->active) return;
   renderer_state_t *renderer = &handler->renderer;
 
-  pipeline_cache_entry_t *pso = get_or_create_pipeline(handler, shader, ubo_count, texture_count);
+  pipeline_cache_entry_t *pso = get_or_create_pipeline(handler, shader, ubo_count, texture_count, handler->g_main_window_data.RenderPass);
   if (!pso) return;
 
   // Allocate a descriptor set for this pipeline
@@ -1261,8 +1336,13 @@ void renderer_draw_mesh(gfx_handler_t *handler, VkCommandBuffer command_buffer, 
                                                               .pBufferInfo = &buffer_infos[i]};
   }
   for (uint32_t i = 0; i < texture_count; ++i) {
+    texture_t *tex = (textures && textures[i] && textures[i]->active && textures[i]->image_view != VK_NULL_HANDLE && textures[i]->sampler != VK_NULL_HANDLE)
+                          ? textures[i]
+                          : handler->renderer.default_texture;
     image_infos[i] = (VkDescriptorImageInfo){
-        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, .imageView = textures[i]->image_view, .sampler = textures[i]->sampler};
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .imageView = tex->image_view,
+        .sampler = tex->sampler};
     uint32_t binding_index = current_binding++;
     descriptor_writes[binding_index] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                                                               .dstSet = descriptor_set,
@@ -1300,13 +1380,28 @@ void renderer_end_frame(gfx_handler_t *handler, VkCommandBuffer command_buffer) 
 
 void renderer_destroy_texture(gfx_handler_t *handler, texture_t *tex) {
   if (!tex || !tex->active) return;
-  // Delay actual destruction until it's safe
+  renderer_lock();
   gfx_handler_t *h = handler;
-  if (h->retire_count < 64) {
-    h->retire_textures[h->retire_count].tex = tex;
-    h->retire_textures[h->retire_count].frame_index = h->g_main_window_data.FrameIndex;
-    h->retire_count++;
+
+  if (h->retire_count >= 256) {
+    for (uint32_t i = 0; i < h->retire_count; i++) {
+      if (h->retire_textures[i].sampler) vkDestroySampler(h->g_device, h->retire_textures[i].sampler, h->g_allocator);
+      if (h->retire_textures[i].image_view) vkDestroyImageView(h->g_device, h->retire_textures[i].image_view, h->g_allocator);
+      if (h->retire_textures[i].image) vkDestroyImage(h->g_device, h->retire_textures[i].image, h->g_allocator);
+      if (h->retire_textures[i].memory) vkFreeMemory(h->g_device, h->retire_textures[i].memory, h->g_allocator);
+    }
+    h->retire_count = 0;
   }
+
+  h->retire_textures[h->retire_count].image = tex->image;
+  h->retire_textures[h->retire_count].image_view = tex->image_view;
+  h->retire_textures[h->retire_count].sampler = tex->sampler;
+  h->retire_textures[h->retire_count].memory = tex->memory;
+  h->retire_textures[h->retire_count].frame_index = h->g_main_window_data.FrameIndex;
+  h->retire_count++;
+
+  memset(tex, 0, sizeof(texture_t));
+  renderer_unlock();
 }
 
 texture_t *renderer_create_texture_array_from_atlas(gfx_handler_t *handler, texture_t *atlas, uint32_t tile_width, uint32_t tile_height,
@@ -1513,7 +1608,7 @@ static void flush_primitives(gfx_handler_t *h, VkCommandBuffer command_buffer) {
   }
 
   // Get or create the pipeline
-  pipeline_cache_entry_t *pso = get_or_create_pipeline(h, renderer->primitive_shader, 1, 0);
+  pipeline_cache_entry_t *pso = get_or_create_pipeline(h, renderer->primitive_shader, 1, 0, h->g_main_window_data.RenderPass);
   if (!pso) {
     log_error(LOG_SOURCE, "Failed to get primitive pipeline");
     return;
@@ -1777,14 +1872,32 @@ void renderer_draw_map(gfx_handler_t *h) {
   renderer_draw_mesh(h, h->current_frame_command_buffer, h->quad_mesh, h->map_shader, h->map_textures, h->map_texture_count, ubos, ubo_sizes, 1);
 }
 
-static int skin_manager_alloc_layer(renderer_state_t *r) {
+static int skin_manager_alloc_layer(gfx_handler_t *h) {
+  renderer_state_t *r = &h->renderer;
   for (int i = 0; i < MAX_SKINS; i++) {
     if (!r->skin_manager.layer_used[i]) {
       r->skin_manager.layer_used[i] = true;
+      r->skin_manager.last_used_frame[i] = h->g_main_window_data.FrameIndex;
       return i;
     }
   }
-  return -1; // full
+
+  uint32_t oldest_frame = (uint32_t)-1;
+  int oldest_layer = -1;
+  for (int i = 0; i < MAX_SKINS; i++) {
+    if (r->skin_manager.last_used_frame[i] < oldest_frame) {
+      oldest_frame = r->skin_manager.last_used_frame[i];
+      oldest_layer = i;
+    }
+  }
+
+  if (oldest_layer != -1) {
+    r->skin_manager.layer_used[oldest_layer] = true;
+    r->skin_manager.last_used_frame[oldest_layer] = h->g_main_window_data.FrameIndex;
+    return oldest_layer;
+  }
+
+  return 0;
 }
 
 static void skin_manager_free_layer(renderer_state_t *r, int idx) {
@@ -1797,6 +1910,9 @@ void renderer_begin_skins(gfx_handler_t *h) { h->renderer.skin_renderer.instance
 
 void renderer_push_skin_instance(gfx_handler_t *h, vec2 pos, float scale, int skin_index, int eye_state, vec2 dir, const anim_state_t *anim_state,
                                  vec3 col_body, vec3 col_feet, bool use_custom_color) {
+  if (skin_index >= 0 && skin_index < MAX_SKINS) {
+    h->renderer.skin_manager.last_used_frame[skin_index] = h->g_main_window_data.FrameIndex;
+  }
   skin_renderer_t *sr = &h->renderer.skin_renderer;
   uint32_t i = sr->instance_count++;
   sr->instance_ptr[i].pos[0] = pos[0];
@@ -1827,7 +1943,7 @@ void renderer_push_skin_instance(gfx_handler_t *h, vec2 pos, float scale, int sk
   memcpy(sr->instance_ptr[i].col_body, col_body, 3 * sizeof(float));
   memcpy(sr->instance_ptr[i].col_feet, col_feet, 3 * sizeof(float));
   sr->instance_ptr[i].col_custom = use_custom_color;
-  sr->instance_ptr[i].col_gs = h->renderer.skin_manager.atlas_array[skin_index].gs_org;
+  sr->instance_ptr[i].col_gs = h->renderer.skin_manager.gs_org[skin_index];
 }
 void renderer_flush_skins(gfx_handler_t *h, VkCommandBuffer cmd, texture_t *skin_array) {
   renderer_state_t *renderer = &h->renderer;
@@ -1835,7 +1951,7 @@ void renderer_flush_skins(gfx_handler_t *h, VkCommandBuffer cmd, texture_t *skin
   if (sr->instance_count == 0 || !skin_array) return;
 
   mesh_t *quad = h->quad_mesh;
-  pipeline_cache_entry_t *pso = get_or_create_pipeline(h, sr->skin_shader, 1, 1);
+  pipeline_cache_entry_t *pso = get_or_create_pipeline(h, sr->skin_shader, 1, 1, h->g_main_window_data.RenderPass);
   if (!pso) return;
 
   primitive_ubo_t ubo;
@@ -1863,8 +1979,11 @@ void renderer_flush_skins(gfx_handler_t *h, VkCommandBuffer cmd, texture_t *skin
   VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = renderer->frame_descriptor_pools[pool_idx], .descriptorSetCount = 1, .pSetLayouts = &pso->descriptor_set_layout};
   if (vkAllocateDescriptorSets(h->g_device, &ai, &desc) != VK_SUCCESS) return;
 
+  texture_t *skin_tex = (skin_array && skin_array->active && skin_array->image_view != VK_NULL_HANDLE && skin_array->sampler != VK_NULL_HANDLE)
+                            ? skin_array
+                            : renderer->default_texture;
   VkDescriptorBufferInfo b_info = {.buffer = renderer->dynamic_ubo_buffer.buffer, .offset = dyn_offset, .range = sizeof(primitive_ubo_t)};
-  VkDescriptorImageInfo i_info = {.sampler = skin_array->sampler, .imageView = skin_array->image_view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+  VkDescriptorImageInfo i_info = {.sampler = skin_tex->sampler, .imageView = skin_tex->image_view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 
   VkWriteDescriptorSet writes[2] = {
       {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = desc, .dstBinding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .pBufferInfo = &b_info},
@@ -1883,6 +2002,239 @@ void renderer_flush_skins(gfx_handler_t *h, VkCommandBuffer cmd, texture_t *skin
   sr->instance_count = 0;
 }
 
+texture_t *renderer_render_skin_preview(gfx_handler_t *h, int layer) {
+  uint32_t preview_width = 128;
+  uint32_t preview_height = 128;
+  
+  renderer_lock();
+  renderer_state_t *r = &h->renderer;
+
+  uint32_t free_slot = (uint32_t)-1;
+  for (uint32_t i = 0; i < MAX_TEXTURES; ++i) {
+    if (!r->textures[i].active) {
+      free_slot = i;
+      break;
+    }
+  }
+
+  if (free_slot == (uint32_t)-1) {
+    uint32_t oldest_frame = (uint32_t)-1;
+    int oldest_slot = -1;
+    for (uint32_t i = 0; i < MAX_TEXTURES; ++i) {
+      if (r->textures[i].active && r->textures[i].last_used_frame < oldest_frame) {
+        oldest_frame = r->textures[i].last_used_frame;
+        oldest_slot = (int)i;
+      }
+    }
+    if (oldest_slot != -1) {
+      renderer_destroy_texture(h, &r->textures[oldest_slot]);
+      free_slot = (uint32_t)oldest_slot;
+    }
+  }
+
+  if (free_slot == (uint32_t)-1) {
+    log_error(LOG_SOURCE, "Max texture count (%d) reached for preview.", MAX_TEXTURES);
+    renderer_unlock();
+    return NULL;
+  }
+
+  texture_t *tex = &r->textures[free_slot];
+  memset(tex, 0, sizeof(texture_t));
+  tex->id = free_slot;
+  tex->active = true;
+  tex->last_used_frame = h->g_main_window_data.FrameIndex;
+  tex->width = preview_width;
+  tex->height = preview_height;
+  tex->mip_levels = 1;
+  tex->layer_count = 1;
+  strncpy(tex->path, "skin_preview_render_target", sizeof(tex->path) - 1);
+
+  VkFormat format = h->g_main_window_data.SurfaceFormat.format;
+  if (format == VK_FORMAT_UNDEFINED) format = VK_FORMAT_R8G8B8A8_UNORM;
+
+  create_image(h, preview_width, preview_height, 1, 1, format, VK_IMAGE_TILING_OPTIMAL,
+               VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &tex->image, &tex->memory);
+
+  transition_image_layout(h, r->transfer_command_pool, tex->image, format, VK_IMAGE_LAYOUT_UNDEFINED,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1, 0, 1);
+
+  tex->image_view = create_image_view(h, tex->image, format, VK_IMAGE_VIEW_TYPE_2D, 1, 1);
+  tex->sampler = create_texture_sampler(h, 1, VK_FILTER_LINEAR);
+  renderer_unlock();
+
+  VkImageView attachments[] = { tex->image_view };
+  VkFramebufferCreateInfo fb_info = {
+      .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+      .renderPass = h->offscreen_render_pass,
+      .attachmentCount = 1,
+      .pAttachments = attachments,
+      .width = preview_width,
+      .height = preview_height,
+      .layers = 1,
+  };
+  VkFramebuffer fb;
+  VkResult fb_res = vkCreateFramebuffer(h->g_device, &fb_info, h->g_allocator, &fb);
+  if (fb_res != VK_SUCCESS) {
+    log_error(LOG_SOURCE, "Failed to create offscreen framebuffer for preview (%d)", fb_res);
+    return tex;
+  }
+
+  primitive_ubo_t ubo = {0};
+  ubo.camPos[0] = 0.0f;
+  ubo.camPos[1] = 0.0f;
+  ubo.zoom = 1.0f;
+  ubo.aspect = 1.0f;
+  ubo.maxMapSize = 1.0f;
+  ubo.mapSize[0] = 1.0f;
+  ubo.mapSize[1] = 1.0f;
+  ubo.lod_bias = 0.0f;
+  glm_ortho_rh_zo(-1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, ubo.proj);
+
+  buffer_t temp_ubo;
+  create_buffer(h, sizeof(primitive_ubo_t), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &temp_ubo);
+  void *data;
+  vkMapMemory(h->g_device, temp_ubo.memory, 0, sizeof(primitive_ubo_t), 0, &data);
+  memcpy(data, &ubo, sizeof(primitive_ubo_t));
+  vkUnmapMemory(h->g_device, temp_ubo.memory);
+
+  VkDescriptorPoolSize pool_sizes[] = {
+      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
+      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1}
+  };
+  VkDescriptorPoolCreateInfo pool_info = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+      .poolSizeCount = 2,
+      .pPoolSizes = pool_sizes,
+      .maxSets = 1,
+  };
+  VkDescriptorPool temp_pool;
+  vkCreateDescriptorPool(h->g_device, &pool_info, h->g_allocator, &temp_pool);
+
+  pipeline_cache_entry_t *pso = get_or_create_pipeline(h, r->skin_renderer.skin_shader, 1, 1, h->offscreen_render_pass);
+
+  VkDescriptorSetAllocateInfo alloc_info = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = temp_pool,
+      .descriptorSetCount = 1,
+      .pSetLayouts = &pso->descriptor_set_layout,
+  };
+  VkDescriptorSet desc_set;
+  vkAllocateDescriptorSets(h->g_device, &alloc_info, &desc_set);
+
+  VkDescriptorBufferInfo buffer_info = {
+      .buffer = temp_ubo.buffer,
+      .offset = 0,
+      .range = sizeof(primitive_ubo_t),
+  };
+  VkDescriptorImageInfo image_info = {
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      .imageView = r->skin_manager.atlas_array->image_view,
+      .sampler = r->skin_manager.atlas_array->sampler,
+  };
+  VkWriteDescriptorSet descriptor_writes[] = {
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = desc_set,
+          .dstBinding = 0,
+          .dstArrayElement = 0,
+          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+          .descriptorCount = 1,
+          .pBufferInfo = &buffer_info,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = desc_set,
+          .dstBinding = 1,
+          .dstArrayElement = 0,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .descriptorCount = 1,
+          .pImageInfo = &image_info,
+      }
+  };
+  vkUpdateDescriptorSets(h->g_device, 2, descriptor_writes, 0, NULL);
+
+  anim_state_t anim_state;
+  anim_state_set(&anim_state, &anim_base, 0.0f);
+  anim_state_add(&anim_state, &anim_idle, 0.0f, 1.0f);
+
+  skin_instance_t instance = {0};
+  instance.pos[0] = 0.0f;
+  instance.pos[1] = 0.0f;
+  instance.scale = 0.75f * 1.25f;
+  instance.skin_index = layer;
+  instance.eye_state = 6;
+  instance.dir[0] = 1.0f;
+  instance.dir[1] = 0.0f;
+  instance.col_body[0] = 1.0f; instance.col_body[1] = 1.0f; instance.col_body[2] = 1.0f;
+  instance.col_feet[0] = 1.0f; instance.col_feet[1] = 1.0f; instance.col_feet[2] = 1.0f;
+  instance.col_custom = 0;
+  instance.col_gs = r->skin_manager.gs_org[layer];
+  
+  instance.body[0] = anim_state.body.x;
+  instance.body[1] = anim_state.body.y;
+  instance.body[2] = anim_state.body.angle;
+
+  instance.back_foot[0] = anim_state.back_foot.x;
+  instance.back_foot[1] = anim_state.back_foot.y;
+  instance.back_foot[2] = anim_state.back_foot.angle;
+
+  instance.front_foot[0] = anim_state.front_foot.x;
+  instance.front_foot[1] = anim_state.front_foot.y;
+  instance.front_foot[2] = anim_state.front_foot.angle;
+
+  instance.attach[0] = anim_state.attach.x;
+  instance.attach[1] = anim_state.attach.y;
+  instance.attach[2] = anim_state.attach.angle;
+
+  buffer_t temp_instance;
+  create_buffer(h, sizeof(skin_instance_t), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &temp_instance);
+  vkMapMemory(h->g_device, temp_instance.memory, 0, sizeof(skin_instance_t), 0, &data);
+  memcpy(data, &instance, sizeof(skin_instance_t));
+  vkUnmapMemory(h->g_device, temp_instance.memory);
+
+  VkCommandBuffer cmd = begin_single_time_commands(h, h->renderer.transfer_command_pool);
+  
+  VkRenderPassBeginInfo render_pass_info = {
+      .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+      .renderPass = h->offscreen_render_pass,
+      .framebuffer = fb,
+      .renderArea.offset = {0, 0},
+      .renderArea.extent = {preview_width, preview_height},
+  };
+  VkClearValue clear_color = {{{0.0f, 0.0f, 0.0f, 0.0f}}};
+  render_pass_info.clearValueCount = 1;
+  render_pass_info.pClearValues = &clear_color;
+  
+  vkCmdBeginRenderPass(cmd, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pso->pipeline);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pso->pipeline_layout, 0, 1, &desc_set, 0, NULL);
+  
+  VkBuffer vertex_buffers[] = {h->quad_mesh->vertex_buffer.buffer, temp_instance.buffer};
+  VkDeviceSize offsets[] = {0, 0};
+  vkCmdBindVertexBuffers(cmd, 0, 2, vertex_buffers, offsets);
+  vkCmdBindIndexBuffer(cmd, h->quad_mesh->index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+  
+  VkViewport viewport = {0.0f, 0.0f, (float)preview_width, (float)preview_height, 0.0f, 1.0f};
+  vkCmdSetViewport(cmd, 0, 1, &viewport);
+  VkRect2D scissor = {{0, 0}, {preview_width, preview_height}};
+  vkCmdSetScissor(cmd, 0, 1, &scissor);
+  
+  vkCmdDrawIndexed(cmd, h->quad_mesh->index_count, 1, 0, 0, 0);
+  
+  vkCmdEndRenderPass(cmd);
+  end_single_time_commands(h, h->renderer.transfer_command_pool, cmd);
+
+  vkDestroyFramebuffer(h->g_device, fb, h->g_allocator);
+  vkDestroyDescriptorPool(h->g_device, temp_pool, h->g_allocator);
+  vkDestroyBuffer(h->g_device, temp_ubo.buffer, h->g_allocator);
+  vkFreeMemory(h->g_device, temp_ubo.memory, h->g_allocator);
+  vkDestroyBuffer(h->g_device, temp_instance.buffer, h->g_allocator);
+  vkFreeMemory(h->g_device, temp_instance.memory, h->g_allocator);
+
+  return tex;
+}
+
 int renderer_load_skin_from_memory(gfx_handler_t *h, const unsigned char *buffer, size_t size, texture_t **out_preview_texture) {
   int tex_width, tex_height, channels;
   stbi_uc *pixels = stbi_load_from_memory(buffer, (int)size, &tex_width, &tex_height, &channels, STBI_rgb_alpha);
@@ -1892,25 +2244,13 @@ int renderer_load_skin_from_memory(gfx_handler_t *h, const unsigned char *buffer
     return -1;
   }
 
-  if (tex_width <= 0 || tex_height <= 0 || tex_width % 256 != 0 || tex_height % 128 != 0) {
-    log_error(LOG_SOURCE, "Skin from memory has invalid dimensions (%dx%d), must be a multiple of 256x128", tex_width, tex_height);
+  if (tex_width <= 0 || tex_height <= 0 || tex_width != tex_height * 2) {
+    log_error(LOG_SOURCE, "Skin from memory has invalid dimensions (%dx%d), aspect ratio must be 2:1", tex_width, tex_height);
     stbi_image_free(pixels);
     return -1;
   }
 
-  // create a smaller separate preview texture for the skin browser
-  if (out_preview_texture) {
-    int preview_width = 128;
-    int preview_height = 64;
-    unsigned char *resized_preview_pixels = malloc(preview_width * preview_height * 4);
-    if (resized_preview_pixels) {
-      stbir_resize_uint8_linear(pixels, tex_width, tex_height, 0, resized_preview_pixels, preview_width, preview_height, 0, STBIR_RGBA);
-      *out_preview_texture = renderer_create_texture_from_rgba(h, resized_preview_pixels, preview_width, preview_height);
-      free(resized_preview_pixels);
-    } else {
-      log_error(LOG_SOURCE, "Failed to allocate memory for skin preview resize.");
-    }
-  }
+  renderer_lock();
 
   // Pre-multiply alpha before resizing (Crucial for correct bilinear interpolation)
   for (int i = 0; i < tex_width * tex_height; i++) {
@@ -1922,6 +2262,9 @@ int renderer_load_skin_from_memory(gfx_handler_t *h, const unsigned char *buffer
     pixels[idx + 2] = (uint8_t)((int)pixels[idx + 2] * a / 255);
   }
 
+
+
+
   const int final_width = 512;
   const int final_height = 512;
   stbi_uc *repacked_pixels = calloc(1, final_width * final_height * 4);
@@ -1932,11 +2275,11 @@ int renderer_load_skin_from_memory(gfx_handler_t *h, const unsigned char *buffer
 
   memset(repacked_pixels, 0, final_width * final_height * 4);
 
-  int scale = tex_width / 256;
+  float scale = (float)tex_width / 256.0f;
 
 #define COPY_PART(src_x, src_y, w, h, dst_x, dst_y)                                                                                \
-  stbir_resize_uint8_linear(pixels + ((src_y) * scale * tex_width + (src_x) * scale) * 4, (w) * scale, (h) * scale, tex_width * 4, \
-                            repacked_pixels + ((dst_y) * final_width + (dst_x)) * 4, (w) * 2, (h) * 2, final_width * 4, STBIR_RGBA)
+  stbir_resize_uint8_linear(pixels + ((int)((src_y) * scale) * tex_width + (int)((src_x) * scale)) * 4, (int)((w) * scale), (int)((h) * scale), tex_width * 4, \
+                            repacked_pixels + ((dst_y) * final_width + (dst_x)) * 4, (w) * 2, (h) * 2, final_width * 4, STBIR_RGBA_PM)
 
   COPY_PART(0, 0, 96, 96, 8, 8);        // Body
   COPY_PART(96, 0, 96, 96, 208, 8);     // Body Shadow
@@ -1959,7 +2302,7 @@ int renderer_load_skin_from_memory(gfx_handler_t *h, const unsigned char *buffer
   }
 
   renderer_state_t *r = &h->renderer;
-  int layer = skin_manager_alloc_layer(r);
+  int layer = skin_manager_alloc_layer(h);
   if (layer < 0) {
     log_error(LOG_SOURCE, "No free skin layers available (max %d reached).", MAX_SKINS);
     if (out_preview_texture && *out_preview_texture) {
@@ -1968,14 +2311,15 @@ int renderer_load_skin_from_memory(gfx_handler_t *h, const unsigned char *buffer
     }
     free(repacked_pixels);
     stbi_image_free(pixels);
+    renderer_unlock();
     return -1;
   }
 
   // do ddnet grayscale retard logic
   // Note: this is done on the original 'pixels' for best quality before resize
   uint32_t freq[256] = {0};
-  int body_w = (tex_width / 256) * 96;
-  int body_h = (tex_height / 128) * 96;
+  int body_w = (int)(scale * 96.0f);
+  int body_h = (int)(scale * 96.0f);
   for (int y = 0; y < body_h; ++y) {
     size_t rowBase = (size_t)y * tex_width;
     for (int x = 0; x < body_w; ++x) {
@@ -1990,7 +2334,7 @@ int renderer_load_skin_from_memory(gfx_handler_t *h, const unsigned char *buffer
   for (int i = 1; i < 256; ++i) {
     if (freq[org_weight] < freq[i]) org_weight = (uint8_t)i;
   }
-  r->skin_manager.atlas_array[layer].gs_org = org_weight;
+  r->skin_manager.gs_org[layer] = org_weight;
 
   // Upload to Vulkan
   VkDeviceSize image_size = final_width * final_height * 4;
@@ -2018,15 +2362,20 @@ int renderer_load_skin_from_memory(gfx_handler_t *h, const unsigned char *buffer
   vkCmdCopyBufferToImage(cmd, staging.buffer, r->skin_manager.atlas_array->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
   end_single_time_commands(h, r->transfer_command_pool, cmd);
 
+  vkDestroyBuffer(h->g_device, staging.buffer, h->g_allocator);
+  vkFreeMemory(h->g_device, staging.memory, h->g_allocator);
+
   if (!build_mipmaps(h, r->skin_manager.atlas_array->image, final_width, final_height, r->skin_manager.atlas_array->mip_levels, layer, 1)) {
     transition_image_layout(h, r->transfer_command_pool, r->skin_manager.atlas_array->image, VK_FORMAT_R8G8B8A8_UNORM,
                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1, layer, 1);
   }
 
-  vkDestroyBuffer(h->g_device, staging.buffer, h->g_allocator);
-  vkFreeMemory(h->g_device, staging.memory, h->g_allocator);
+  if (out_preview_texture) {
+    *out_preview_texture = renderer_render_skin_preview(h, layer);
+  }
 
-  log_info(LOG_SOURCE, "Loaded skin from memory into layer %d", layer);
+  // log_info(LOG_SOURCE, "Loaded skin from memory into layer %d", layer);
+  renderer_unlock();
   return layer;
 }
 
@@ -2048,9 +2397,11 @@ int renderer_load_skin_from_file(gfx_handler_t *h, const char *path, texture_t *
 }
 
 void renderer_unload_skin(gfx_handler_t *h, int layer) {
+  renderer_lock();
   renderer_state_t *r = &h->renderer;
   skin_manager_free_layer(r, layer);
-  log_info(LOG_SOURCE, "Freed skin layer %d", layer);
+  // log_info(LOG_SOURCE, "Freed skin layer %d", layer);
+  renderer_unlock();
 }
 
 static void renderer_init_atlas_renderer(gfx_handler_t *h, atlas_renderer_t *ar, const char *atlas_path, const sprite_definition_t *sprites,
@@ -2263,7 +2614,7 @@ void renderer_flush_atlas_instances(gfx_handler_t *h, VkCommandBuffer cmd, atlas
   if (count == 0 || !ar->shader || !ar->atlas_texture) return;
 
   mesh_t *quad = h->quad_mesh;
-  pipeline_cache_entry_t *pso = get_or_create_pipeline(h, ar->shader, 1, 1);
+  pipeline_cache_entry_t *pso = get_or_create_pipeline(h, ar->shader, 1, 1, h->g_main_window_data.RenderPass);
   if (!pso) return;
 
   primitive_ubo_t ubo;

@@ -88,9 +88,12 @@ struct gfx_handler_t {
 
   // retirement list for delayed frees
   struct {
-    texture_t *tex;
+    VkImage image;
+    VkImageView image_view;
+    VkSampler sampler;
+    VkDeviceMemory memory;
     uint32_t frame_index;
-  } retire_textures[64];
+  } retire_textures[256];
   uint32_t retire_count;
 
   // Offscreen rendering (for ImGui game view)
