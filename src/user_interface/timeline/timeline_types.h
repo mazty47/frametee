@@ -193,6 +193,9 @@ struct timeline_state {
   // Physics Integration
   physics_v_t vec;
   SWorldCore previous_world;
+  SWorldCore prev_world_cached;
+  SWorldCore world_cached;
+  int cached_tick;
 
   // Back-pointer to parent UI handler
   ui_handler_t *ui;

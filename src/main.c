@@ -78,14 +78,18 @@ int main(int argc, char **argv) {
     float intra = fminf((igGetTime() - handler.user_interface.timeline.last_update_time) / (1.f / (handler.user_interface.timeline.playback_speed * speed_scale)), 1.f);
     if (handler.user_interface.timeline.is_reversing) intra = 1.f - intra;
 
-    renderer_submit_map(&handler, Z_LAYER_MAP);
+    if (handler.user_interface.render_map) {
+      renderer_submit_map(&handler, Z_LAYER_MAP);
+    }
     render_pickups(&handler.user_interface);
     render_players(&handler.user_interface);
 
     handler.user_interface.particle_system.current_time = (double)(handler.user_interface.timeline.current_tick + intra) * 0.02;
     particle_system_update_sim(&handler.user_interface.particle_system, handler.map_data);
-    particle_system_render(&handler.user_interface.particle_system, &handler, 0);
-    particle_system_render(&handler.user_interface.particle_system, &handler, 1);
+    if (handler.user_interface.render_particles) {
+      particle_system_render(&handler.user_interface.particle_system, &handler, 0);
+      particle_system_render(&handler.user_interface.particle_system, &handler, 1);
+    }
     render_cursor(&handler.user_interface);
     renderer_flush_queue(&handler, handler.current_frame_command_buffer);
 

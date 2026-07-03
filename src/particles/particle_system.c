@@ -122,16 +122,31 @@ static void flow_add(particle_system_t *ps, vec2 pos, float strength) {
   glm_vec2_copy(pos, ps->flow_events[id].pos);
 }
 
+static float g_flow_decay_table[76];
+static bool g_flow_decay_inited = false;
+
+static void init_flow_decay_table(void) {
+  if (g_flow_decay_inited) return;
+  for (int i = 0; i <= 75; i++) {
+    g_flow_decay_table[i] = powf(0.85f, (float)i);
+  }
+  g_flow_decay_inited = true;
+}
+
 static void flow_get(particle_system_t *ps, double sim_time, vec2 pos, vec2 out_vel) {
   out_vel[0] = 0;
   out_vel[1] = 0;
+  if (!g_flow_decay_inited) init_flow_decay_table();
+
   for (int i = 0; i < MAX_FLOW_EVENTS; ++i) {
     if (!ps->flow_events[i].active) continue;
     double age = sim_time - ps->flow_events[i].time;
     if (age < 0 || age > 1.5) continue; // Decays fully after 1.5s
 
-    // Match reference: 0.85 decay per tick (50Hz)
-    float decay = powf(0.85f, (float)(age * 50.0));
+    int tick_age = (int)(age * 50.0);
+    if (tick_age < 0 || tick_age > 75) continue;
+
+    float decay = g_flow_decay_table[tick_age];
     if (decay < 0.01f) continue;
 
     float dist = glm_vec2_distance(pos, ps->flow_events[i].pos);
@@ -155,13 +170,21 @@ static void move_point(map_data_t *map, vec2 *inout_pos, vec2 *inout_vel, float 
   }
   vec2 pos = {(*inout_pos)[0], (*inout_pos)[1]};
   vec2 vel = {(*inout_vel)[0], (*inout_vel)[1]};
+  if (vel[0] == 0.0f && vel[1] == 0.0f) return;
+
   vec2 next_pos;
   glm_vec2_add(pos, vel, next_pos);
   int width = map->width, height = map->height;
+  unsigned char *game_layer_data = map->game_layer.data;
+  if (!game_layer_data) {
+    glm_vec2_add(pos, vel, *inout_pos);
+    return;
+  }
+
   int tx = (int)(next_pos[0] / 32.0f), ty = (int)(next_pos[1] / 32.0f);
   bool collision = (tx < 0 || tx >= width || ty < 0 || ty >= height)
                        ? true
-                       : (map->game_layer.data[ty * width + tx] == 1 || map->game_layer.data[ty * width + tx] == 3);
+                       : (game_layer_data[ty * width + tx] == 1 || game_layer_data[ty * width + tx] == 3);
 
   if (collision) {
     int curr_tx = (int)(pos[0] / 32.0f), curr_ty = (int)(pos[1] / 32.0f);
@@ -169,7 +192,7 @@ static void move_point(map_data_t *map, vec2 *inout_pos, vec2 *inout_vel, float 
     int check_tx = (int)((pos[0] + vel[0]) / 32.0f);
     if (check_tx != curr_tx) {
       if (check_tx >= 0 && check_tx < width && curr_ty >= 0 && curr_ty < height) {
-        if (map->game_layer.data[curr_ty * width + check_tx] == 1 || map->game_layer.data[curr_ty * width + check_tx] == 3) hit_x = true;
+        if (game_layer_data[curr_ty * width + check_tx] == 1 || game_layer_data[curr_ty * width + check_tx] == 3) hit_x = true;
       } else hit_x = true;
     }
     if (hit_x) {
@@ -230,8 +253,6 @@ void particle_system_update_sim(particle_system_t *ps, map_data_t *map) {
     }
 
     // Incremental Simulation / Rewind Handling
-    // If the particle's last simulation time is in the future compared to target,
-    // we must reset it to its spawn state to re-simulate it forward.
     if (p->last_sim_time > sim_target + 0.001) {
       glm_vec2_copy(p->start_pos, p->current_pos);
       glm_vec2_copy(p->start_vel, p->current_vel);
@@ -241,7 +262,6 @@ void particle_system_update_sim(particle_system_t *ps, map_data_t *map) {
 
     while (p->last_sim_time < sim_target) {
       double next_step_time = p->last_sim_time + step;
-      // Ensure we don't overshoot the current global system time
       if (next_step_time > sim_target + 0.0001) break;
 
       particle_simulate_step(ps, p, p->current_pos, p->current_vel, &p->current_seed, p->last_sim_time, (float)step, map);
@@ -255,69 +275,74 @@ void particle_system_update(particle_system_t *ps, float dt, map_data_t *map) {
   (void)map;
 }
 
-void particle_system_render(particle_system_t *ps, gfx_handler_t *gfx, int layer) {
-  int groups_back[] = {GROUP_PROJECTILE_TRAIL, GROUP_TRAIL_EXTRA};
-  int groups_front[] = {GROUP_EXPLOSIONS, GROUP_EXTRA, GROUP_GENERAL};
-  int *groups = layer == 0 ? groups_back : groups_front;
-  int count = layer == 0 ? 2 : 3;
-  int current_atlas_type = -1;
-  atlas_renderer_t *current_ar = NULL;
+static const int g_group_layer[NUM_PARTICLE_GROUPS] = {
+    0, // GROUP_PROJECTILE_TRAIL
+    0, // GROUP_TRAIL_EXTRA
+    1, // GROUP_EXPLOSIONS
+    1, // GROUP_EXTRA
+    1  // GROUP_GENERAL
+};
 
-  const double step = 0.02;
+void particle_system_render(particle_system_t *ps, gfx_handler_t *gfx, int layer) {
+  if (ps->active_count == 0) return;
+
+  atlas_renderer_t *ar_gameskin = &gfx->renderer.gameskin_renderer;
+  atlas_renderer_t *ar_particle = &gfx->renderer.particle_renderer;
+  atlas_renderer_t *ar_extras = &gfx->renderer.extras_renderer;
+
+  // Frustum culling bounds in pixel coordinates
+  float min_wx, min_wy, max_wx, max_wy;
+  screen_to_world(gfx, 0, 0, &min_wx, &min_wy);
+  screen_to_world(gfx, gfx->viewport[0], gfx->viewport[1], &max_wx, &max_wy);
+
+  float margin = 200.0f; // pixel margin for large particles
+  float cam_min_x = min_wx * 32.0f - margin;
+  float cam_max_x = max_wx * 32.0f + margin;
+  float cam_min_y = min_wy * 32.0f - margin;
+  float cam_max_y = max_wy * 32.0f + margin;
+
+  int z_layer = layer ? Z_LAYER_PARTICLES_FRONT : Z_LAYER_PARTICLES_BACK;
 
   for (int i = 0; i < ps->active_count; ++i) {
     particle_t *p = &ps->particles[i];
 
-    // Group filter
-    bool group_match = false;
-    for (int g = 0; g < count; ++g) {
-      if (p->group == groups[g]) {
-        group_match = true;
-        break;
-      }
-    }
-    if (!group_match) continue;
+    if (g_group_layer[p->group] != layer) continue;
 
     double age = ps->current_time - p->spawn_time;
-    if (age < 0) continue; // Future
+    if (age < 0 || age > p->life_span) continue;
 
-    // Simulation is done in update_sim. We just interpolate.
-
+    // Linear sub-step extrapolation for smooth rendering
+    float dt = (float)(ps->current_time - p->last_sim_time);
     vec2 pos;
-    glm_vec2_copy(p->current_pos, pos);
+    if (dt > 0.0001f) {
+      pos[0] = p->current_pos[0] + p->current_vel[0] * dt;
+      pos[1] = p->current_pos[1] + p->current_vel[1] * dt;
+    } else {
+      pos[0] = p->current_pos[0];
+      pos[1] = p->current_pos[1];
+    }
 
-    // Interpolation for smooth movement
-    // Predict next step without modifying state
-    float t = (float)((ps->current_time - p->last_sim_time) / step);
-    if (t > 0.001f && t <= 1.0f) {
-      vec2 next_pos, next_vel;
-      glm_vec2_copy(p->current_pos, next_pos);
-      glm_vec2_copy(p->current_vel, next_vel);
-      uint32_t temp_seed = p->current_seed;
-
-      particle_simulate_step(ps, p, next_pos, next_vel, &temp_seed, p->last_sim_time, (float)step, gfx->map_data);
-      glm_vec2_lerp(p->current_pos, next_pos, t, pos);
+    // Camera frustum culling
+    if (pos[0] < cam_min_x || pos[0] > cam_max_x || pos[1] < cam_min_y || pos[1] > cam_max_y) {
+      continue;
     }
 
     float rot = p->rot + p->rot_speed * (float)age;
 
     int atlas_type = (p->sprite_index < PARTICLE_SPRITE_OFFSET) ? 1 : (p->sprite_index < EXTRA_SPRITE_OFFSET ? 2 : 3);
-    atlas_renderer_t *target_ar =
-        (atlas_type == 1) ? &gfx->renderer.gameskin_renderer : (atlas_type == 2 ? &gfx->renderer.particle_renderer : &gfx->renderer.extras_renderer);
+    atlas_renderer_t *target_ar = (atlas_type == 1) ? ar_gameskin : (atlas_type == 2 ? ar_particle : ar_extras);
     int render_sprite_idx = p->sprite_index - (atlas_type == 1 ? 0 : (atlas_type == 2 ? PARTICLE_SPRITE_OFFSET : EXTRA_SPRITE_OFFSET));
 
-    if (atlas_type != current_atlas_type) {
-      current_atlas_type = atlas_type;
-      current_ar = target_ar;
-    }
     float life_frac = (float)age / p->life_span;
     float size = p->start_size * (1.0f - life_frac) + p->end_size * life_frac;
     vec4 col;
     glm_vec4_copy(p->color, col);
     if (p->use_alpha_fading) col[3] = p->start_alpha * (1.0f - life_frac) + p->end_alpha * life_frac;
-    renderer_submit_atlas(gfx, current_ar, layer ? Z_LAYER_PARTICLES_FRONT : Z_LAYER_PARTICLES_BACK, (vec2){pos[0] / 32.f, pos[1] / 32.f}, (vec2){size / 32.f, size / 32.f}, rot, render_sprite_idx, false, col, false);
+
+    renderer_submit_atlas(gfx, target_ar, z_layer, (vec2){pos[0] / 32.f, pos[1] / 32.f}, (vec2){size / 32.f, size / 32.f}, rot, render_sprite_idx, false, col, false);
   }
 }
+
 
 void particles_create_explosion(particle_system_t *ps, vec2 pos) {
   flow_add(ps, pos, 5000.0f);

@@ -201,8 +201,26 @@ void config_load(ui_handler_t *ui) {
     }
     toml_datum_t center_dot = toml_get(graphics_settings, "center_dot");
     if (center_dot.type == TOML_BOOLEAN) {
-      ui->center_dot = (float)center_dot.u.boolean;
+      ui->center_dot = center_dot.u.boolean;
     }
+
+    toml_datum_t render_map = toml_get(graphics_settings, "render_map");
+    if (render_map.type == TOML_BOOLEAN) ui->render_map = render_map.u.boolean;
+
+    toml_datum_t render_players = toml_get(graphics_settings, "render_players");
+    if (render_players.type == TOML_BOOLEAN) ui->render_players = render_players.u.boolean;
+
+    toml_datum_t render_weapons = toml_get(graphics_settings, "render_weapons");
+    if (render_weapons.type == TOML_BOOLEAN) ui->render_weapons = render_weapons.u.boolean;
+
+    toml_datum_t render_particles = toml_get(graphics_settings, "render_particles");
+    if (render_particles.type == TOML_BOOLEAN) ui->render_particles = render_particles.u.boolean;
+
+    toml_datum_t render_pickups = toml_get(graphics_settings, "render_pickups");
+    if (render_pickups.type == TOML_BOOLEAN) ui->render_pickups = render_pickups.u.boolean;
+
+    toml_datum_t render_hud = toml_get(graphics_settings, "render_hud");
+    if (render_hud.type == TOML_BOOLEAN) ui->render_hud = render_hud.u.boolean;
   }
 
   toml_datum_t projects_settings = toml_get(res.toptab, "projects");
@@ -305,6 +323,12 @@ void config_save(ui_handler_t *ui) {
   fprintf(fp, "bg_color = [%.3f, %.3f, %.3f]\n", ui->bg_color[0], ui->bg_color[1], ui->bg_color[2]);
   fprintf(fp, "prediction_alpha = [%.3f, %.3f]\n", ui->prediction_alpha[0], ui->prediction_alpha[1]);
   fprintf(fp, "center_dot = %s\n", ui->center_dot ? "true" : "false");
+  fprintf(fp, "render_map = %s\n", ui->render_map ? "true" : "false");
+  fprintf(fp, "render_players = %s\n", ui->render_players ? "true" : "false");
+  fprintf(fp, "render_weapons = %s\n", ui->render_weapons ? "true" : "false");
+  fprintf(fp, "render_particles = %s\n", ui->render_particles ? "true" : "false");
+  fprintf(fp, "render_pickups = %s\n", ui->render_pickups ? "true" : "false");
+  fprintf(fp, "render_hud = %s\n", ui->render_hud ? "true" : "false");
 
   fprintf(fp, "\n[projects]\n");
   fprintf(fp, "recent = [\n");

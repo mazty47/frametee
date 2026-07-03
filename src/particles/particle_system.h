@@ -17,39 +17,33 @@ typedef enum { GROUP_PROJECTILE_TRAIL = 0,
                NUM_PARTICLE_GROUPS } particle_group_t;
 
 typedef struct {
-  double spawn_time;
-  vec2 start_pos;
-  vec2 start_vel;
-
-  float life_span;
-  float start_size;
-  float end_size;
-
-  float rot;
-  float rot_speed;
-
-  float gravity;
-  float friction;
-  float flow_affected;
-
-  vec4 color;
-
-  bool use_alpha_fading;
-  float start_alpha;
-  float end_alpha;
-
-  int sprite_index;
-  bool collides;
-
-  int group;
-  uint32_t seed;
-  int creation_tick;
-
-  // State for incremental simulation
+  // Hot fields accessed on every simulation step
   vec2 current_pos;
   vec2 current_vel;
   double last_sim_time;
+  double spawn_time;
+  float life_span;
+  float gravity;
+  float friction;
+  float flow_affected;
   uint32_t current_seed;
+  int creation_tick;
+  int group;
+  int sprite_index;
+  bool collides;
+
+  // Render / Template fields
+  vec2 start_pos;
+  vec2 start_vel;
+  float start_size;
+  float end_size;
+  float rot;
+  float rot_speed;
+  vec4 color;
+  bool use_alpha_fading;
+  float start_alpha;
+  float end_alpha;
+  uint32_t seed;
 } particle_t;
 
 typedef struct {

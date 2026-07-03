@@ -97,6 +97,14 @@ void render_menu_bar(ui_handler_t *ui) {
 
         igColorEdit3("Background Color", ui->bg_color, ImGuiColorEditFlags_NoInputs);
         igSeparator();
+        igText("Render Elements");
+        igCheckbox("Map", &ui->render_map);
+        igCheckbox("Players", &ui->render_players);
+        igCheckbox("Weapons", &ui->render_weapons);
+        igCheckbox("Particles", &ui->render_particles);
+        igCheckbox("Pickups", &ui->render_pickups);
+        igCheckbox("HUD / Crosshair", &ui->render_hud);
+        igSeparator();
         igDragFloat("Prediction alpha own", &ui->prediction_alpha[0], 0.1f, 0.0f, 1.0f, "%.3f", 0);
         igDragFloat("Prediction alpha others", &ui->prediction_alpha[1], 0.1f, 0.0f, 1.0f, "%.3f", 0);
         igCheckbox("Show center dot", &ui->center_dot);
@@ -357,6 +365,13 @@ void ui_init_config(ui_handler_t *ui) {
   ui->prediction_alpha[1] = 1.0f;
   ui->center_dot = 1;
 
+  ui->render_map = true;
+  ui->render_players = true;
+  ui->render_weapons = true;
+  ui->render_particles = true;
+  ui->render_pickups = true;
+  ui->render_hud = true;
+
   keybinds_init(&ui->keybinds);
   config_load(ui);
 }
@@ -504,6 +519,7 @@ static void process_net_events(ui_handler_t *ui) {
 }
 
 void render_players(ui_handler_t *ui) {
+  if (!ui->render_players) return;
   gfx_handler_t *gfx = ui->gfx_handler;
   physics_handler_t *ph = &gfx->physics_handler;
   if (!ph->loaded) return;
@@ -511,9 +527,8 @@ void render_players(ui_handler_t *ui) {
   SWorldCore prev_world = wc_empty();
   SWorldCore world = wc_empty();
 
-  // Get the world state at the current tick. The model handles caching internally.
-  model_get_world_state_at_tick(&ui->timeline, ui->timeline.current_tick - 1, &prev_world, true);
-  model_get_world_state_at_tick(&ui->timeline, ui->timeline.current_tick, &world, true);
+  // Get the world state pair for interpolation without cache thrashing.
+  model_get_world_state_pair(&ui->timeline, ui->timeline.current_tick, &prev_world, &world, true);
 
   if (ui->timeline.player_track_count != world.m_NumCharacters) {
     wc_free(&prev_world);
@@ -638,7 +653,7 @@ void render_players(ui_handler_t *ui) {
 
     SCharacterCore *prev_core = &prev_world.m_pCharacters[i];
     // render hook
-    if (core->m_HookState >= 1 && (prev_core->m_HookState != HOOK_IDLE || intra > 0.25)) {
+    if (ui->render_weapons && core->m_HookState >= 1 && (prev_core->m_HookState != HOOK_IDLE || intra > 0.25)) {
 
       // do interpolation
       vec2 hook_pos;
@@ -672,7 +687,7 @@ void render_players(ui_handler_t *ui) {
       vec2 head_size = {(float)head_sprite_def->w / 64.0f, (float)head_sprite_def->h / 64.0f};
       renderer_submit_atlas(gfx, &gfx->renderer.gameskin_renderer, Z_LAYER_HOOK, hook_pos, head_size, angle, GAMESKIN_HOOK_HEAD, false, (vec4){1.0f, 1.0f, 1.0f, 1.0f}, false);
     }
-    if (!core->m_FreezeTime && core->m_ActiveWeapon < NUM_WEAPONS) {
+    if (ui->render_weapons && !core->m_FreezeTime && core->m_ActiveWeapon < NUM_WEAPONS) {
       const weapon_spec_t *spec = &game_data.weapons.id[core->m_ActiveWeapon];
       float aim_angle = atan2f(-dir[1], dir[0]);
 
@@ -952,7 +967,7 @@ void render_players(ui_handler_t *ui) {
 }
 
 void render_pickups(ui_handler_t *ui) {
-  if (ui->num_pickups <= 0) return;
+  if (!ui->render_pickups || ui->num_pickups <= 0) return;
   gfx_handler_t *h = ui->gfx_handler;
   atlas_renderer_t *ar = &h->renderer.gameskin_renderer;
 
@@ -1046,7 +1061,7 @@ void render_pickups(ui_handler_t *ui) {
 }
 
 void render_cursor(ui_handler_t *ui) {
-  if (!ui->timeline.recording) return;
+  if (!ui->render_hud || !ui->timeline.recording) return;
 
   gfx_handler_t *handler = ui->gfx_handler;
 

@@ -64,6 +64,12 @@ struct ui_handler_t {
   bool show_net_events_window;
   bool vsync;
   bool show_fps;
+  bool render_map;
+  bool render_players;
+  bool render_weapons;
+  bool render_particles;
+  bool render_pickups;
+  bool render_hud;
   bool weapons[NUM_WEAPONS];
   bool selecting_override_pos;
 

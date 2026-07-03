@@ -55,6 +55,9 @@ void model_init(timeline_state_t *ts, ui_handler_t *ui) {
   ts->ui = ui;
   v_init(&ts->vec);
   ts->previous_world = wc_empty();
+  ts->prev_world_cached = wc_empty();
+  ts->world_cached = wc_empty();
+  ts->cached_tick = -1;
 
   ts->gui_playback_speed = 50;
   ts->playback_speed = 50;
@@ -102,6 +105,8 @@ void model_cleanup(timeline_state_t *ts) {
 
   v_destroy(&ts->vec);
   wc_free(&ts->previous_world);
+  wc_free(&ts->prev_world_cached);
+  wc_free(&ts->world_cached);
   snippet_id_vector_free(&ts->selected_snippets);
 
   memset(ts, 0, sizeof(timeline_state_t));
@@ -536,6 +541,7 @@ void model_clear_all_recording_buffers(timeline_state_t *ts) {
 
 void model_recalc_physics(timeline_state_t *ts, int tick) {
   ts->vec.current_size = imin(ts->vec.current_size, imax(tick / 50 + 1, 1));
+  ts->cached_tick = -1;
   if (ts->previous_world.m_GameTick > tick) {
     ts->previous_world.m_GameTick = INT_MAX;
   }
@@ -704,6 +710,80 @@ void model_get_world_state_at_tick(timeline_state_t *ts, int tick, SWorldCore *o
 
   out_world->particle = NULL;
   wc_copy_world(&ts->previous_world, out_world);
+}
+
+void model_get_world_state_pair(timeline_state_t *ts, int tick, SWorldCore *out_prev_world, SWorldCore *out_world, bool effects) {
+  if (tick <= 0) {
+    model_get_world_state_at_tick(ts, 0, out_prev_world, effects);
+    model_get_world_state_at_tick(ts, 0, out_world, effects);
+    return;
+  }
+
+  // Fast path: if the cached pair is already at 'tick'
+  if (ts->cached_tick == tick) {
+    wc_copy_world(out_prev_world, &ts->prev_world_cached);
+    wc_copy_world(out_world, &ts->world_cached);
+    return;
+  }
+
+  // Fast path: playing forward by 1 tick (cached_tick == tick - 1)
+  if (ts->cached_tick == tick - 1) {
+    // Current world at tick-1 becomes prev_world
+    wc_copy_world(&ts->prev_world_cached, &ts->world_cached);
+    wc_copy_world(out_prev_world, &ts->prev_world_cached);
+
+    // Simulate 1 tick from cached_world (which is at tick-1) to reach tick
+    ts->world_cached.user_data = ts->ui;
+    int current_sim_tick = ts->world_cached.m_GameTick;
+    particle_system_t *ps = &ts->ui->particle_system;
+
+    bool is_new_logic_tick = (effects && current_sim_tick > ps->last_simulated_tick);
+    if (is_new_logic_tick) {
+      ts->world_cached.particle = ui_particle_callback;
+      ps->current_time = (double)current_sim_tick / 50.0;
+      ps->rng_seed = current_sim_tick;
+    } else {
+      ts->world_cached.particle = NULL;
+    }
+
+    for (int p = 0; p < ts->world_cached.m_NumCharacters; ++p) {
+      SPlayerInput input = model_get_input_at_tick(ts, p, current_sim_tick);
+      cc_on_input(&ts->world_cached.m_pCharacters[p], &input);
+    }
+
+    wc_tick(&ts->world_cached);
+
+    if (is_new_logic_tick) {
+      if (ts->world_cached.m_GameTick % 5 == 0) {
+        for (int p = 0; p < ts->world_cached.m_NumCharacters; ++p) {
+          SCharacterCore *core = &ts->world_cached.m_pCharacters[p];
+          if (core->m_FreezeTime > 0) {
+            vec2 pos = {vgetx(core->m_Pos), vgety(core->m_Pos)};
+            particles_create_freezing_flakes(ps, pos, (vec2){32.0f, 32.0f}, 1.0f);
+          }
+        }
+      }
+      for (int i = 0; i < ts->ui->num_ninja_pickups; ++i) {
+        int p = ts->ui->ninja_pickup_indices[i];
+        vec2 pos = {vgetx(ts->ui->pickup_positions[p]), vgety(ts->ui->pickup_positions[p])};
+        particles_create_powerup_shine(ps, pos, (vec2){96, 18}, 1.0f);
+      }
+      ps->last_simulated_tick = current_sim_tick;
+    }
+
+    ts->world_cached.particle = NULL;
+    wc_copy_world(out_world, &ts->world_cached);
+    ts->cached_tick = tick;
+    return;
+  }
+
+  // Full path: calculate state at tick - 1 and state at tick
+  model_get_world_state_at_tick(ts, tick - 1, &ts->prev_world_cached, effects);
+  model_get_world_state_at_tick(ts, tick, &ts->world_cached, effects);
+  ts->cached_tick = tick;
+
+  wc_copy_world(out_prev_world, &ts->prev_world_cached);
+  wc_copy_world(out_world, &ts->world_cached);
 }
 
 void model_apply_starting_config(timeline_state_t *ts, int track_index) {
