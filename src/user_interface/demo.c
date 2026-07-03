@@ -494,10 +494,12 @@ int import_demo(ui_handler_t *ui, const char *path) {
   if (!f) return -1;
   dd_demo_reader *dr = demo_r_create();
   if (!demo_r_open(dr, f)) {
+    printf("[import_demo] demo_r_open FAILED!\n");
     demo_r_destroy(&dr);
     fclose(f);
     return -1;
   }
+  printf("[import_demo] demo_r_open SUCCESS!\n");
 
   dd_demo_info *info = demo_r_get_info(dr);
   if (info->map_size > 0) {
@@ -526,11 +528,15 @@ int import_demo(ui_handler_t *ui, const char *path) {
   int first_tick = -1;
   char player_names[64][16] = {0};
 
+  int processed_chunks = 0;
   dd_demo_chunk chunk;
   uint8_t unpacked_snap[DD_SNAPSHOT_MAX_SIZE];
 
   int last_processed_norm_tick = -1;
   while (demo_r_next_chunk(dr, &chunk)) {
+    if (processed_chunks++ < 20) {
+      printf("CHUNK type=%d tick=%d\n", chunk.type, chunk.tick);
+    }
     if (first_tick == -1) first_tick = chunk.tick;
     int norm_tick = chunk.tick - first_tick;
 
@@ -553,7 +559,6 @@ int import_demo(ui_handler_t *ui, const char *path) {
         // Propagate inputs to physics players for this tick
         for (int cid = 0; cid < 64; ++cid) {
           if (dr->phys.last_base_tick[cid] != -1) {
-            // Allocate memory if capacity exceeded
             if (last_processed_norm_tick >= caps[cid]) {
               int old_cap = caps[cid];
               caps[cid] = (last_processed_norm_tick + 1) * 2;
@@ -568,7 +573,6 @@ int import_demo(ui_handler_t *ui, const char *path) {
               inputs[cid][last_processed_norm_tick] = inputs[cid][last_processed_norm_tick - 1];
             }
 
-            // Write input to the physics simulation core
             SPlayerInput *inp = &inputs[cid][last_processed_norm_tick];
             dr->phys.players[cid].input.m_Direction = inp->m_Direction;
             dr->phys.players[cid].input.m_TargetX = inp->m_TargetX;
@@ -583,10 +587,20 @@ int import_demo(ui_handler_t *ui, const char *path) {
           }
         }
 
-        dd_demo_phys_advance_to(&dr->phys, actual_tick, &dr->tuning, &dr->map);
-        dr->current_tick = actual_tick;
+        if (last_processed_norm_tick == norm_tick && current_snap) {
+          dd_demo_phys_update(&dr->phys, current_snap, actual_tick, &dr->tuning, &dr->map);
+          dr->current_tick = actual_tick;
+        } else {
+          dd_demo_phys_advance_to(&dr->phys, actual_tick, &dr->tuning, &dr->map);
+          dr->current_tick = actual_tick;
+        }
+
         uint8_t phys_snap_buf[DD_SNAPSHOT_MAX_SIZE];
         int snap_size = demo_r_get_phys_snap(dr, phys_snap_buf);
+        if (snap_size > 8) {
+          static int ok_prints = 0;
+          if (ok_prints++ < 20) printf("snap_size > 8! (%d)\n", snap_size);
+        }
         if (snap_size > 0) {
           const dd_snapshot *phys_snap = (const dd_snapshot *)phys_snap_buf;
           for (int i = 0; i < phys_snap->num_items; i++) {
@@ -605,6 +619,7 @@ int import_demo(ui_handler_t *ui, const char *path) {
               }
 
               if (item_type == DD_NETOBJTYPE_CHARACTER) {
+                printf("Found character %d at norm_tick %d\n", cid, last_processed_norm_tick);
                 const dd_netobj_character *character = (const dd_netobj_character *)dd_snap_item_data(item);
 
                 SCharacterCore *c = &states[cid][last_processed_norm_tick];
@@ -614,16 +629,19 @@ int import_demo(ui_handler_t *ui, const char *path) {
                   memset(c, 0, sizeof(SCharacterCore));
                 }
 
-                c->m_Pos = vec2_init(character->core.m_X + MAP_EXPAND32, character->core.m_Y + MAP_EXPAND32);
-                c->m_Vel = vec2_init(character->core.m_VelX / 256.0f, character->core.m_VelY / 256.0f);
-                c->m_HookPos = vec2_init(character->core.m_HookX + MAP_EXPAND32, character->core.m_HookY + MAP_EXPAND32);
-                c->m_HookDir = vec2_init(character->core.m_HookDx / 256.0f, character->core.m_HookDy / 256.0f);
+                c->m_Pos[0] = character->core.m_X + MAP_EXPAND32;
+                c->m_Pos[1] = character->core.m_Y + MAP_EXPAND32;
+                c->m_Vel[0] = character->core.m_VelX / 256.0f;
+                c->m_Vel[1] = character->core.m_VelY / 256.0f;
+                c->m_HookPos[0] = character->core.m_HookX + MAP_EXPAND32;
+                c->m_HookPos[1] = character->core.m_HookY + MAP_EXPAND32;
+                c->m_HookDir[0] = character->core.m_HookDx / 256.0f;
+                c->m_HookDir[1] = character->core.m_HookDy / 256.0f;
                 c->m_HookState = character->core.m_HookState;
                 c->m_HookTick = character->core.m_HookTick;
                 c->m_HookedPlayer = character->core.m_HookedPlayer;
                 c->m_Jumped = character->core.m_Jumped;
                 
-                // Copy additional fields from the physics state in dr->phys.players[cid]
                 c->m_Jumps = dr->phys.players[cid].jumps;
                 c->m_JumpedTotal = dr->phys.players[cid].jumped_total;
                 c->m_Solo = dr->phys.players[cid].solo;
@@ -636,7 +654,6 @@ int import_demo(ui_handler_t *ui, const char *path) {
                 int tx = (int)(cosf(angle_rad) * 100.0f);
                 int ty = (int)(sinf(angle_rad) * 100.0f);
 
-                // Update the actual inputs array used by the snippet editor
                 SPlayerInput *inp = &inputs[cid][last_processed_norm_tick];
                 inp->m_Direction = character->core.m_Direction;
                 inp->m_TargetX = tx;
@@ -647,6 +664,7 @@ int import_demo(ui_handler_t *ui, const char *path) {
 
                 counts_char[cid] = last_processed_norm_tick + 1;
                 counts_input[cid] = last_processed_norm_tick + 1;
+                printf("Updated counts_char[%d] to %d\n", cid, counts_char[cid]);
               }
             }
           }
@@ -654,9 +672,6 @@ int import_demo(ui_handler_t *ui, const char *path) {
       }
 
       if (current_snap) {
-        // Update physics with actual data for this tick
-        dd_demo_phys_update(&dr->phys, current_snap, chunk.tick, &dr->tuning, &dr->map);
-
         for (int i = 0; i < current_snap->num_items; i++) {
           const dd_snap_item *item = dd_snap_get_item(current_snap, i);
           int item_type = dd_snap_item_type(item);
@@ -666,12 +681,11 @@ int import_demo(ui_handler_t *ui, const char *path) {
               int old_cap = caps[cid];
               caps[cid] = (last_processed_norm_tick + 1) * 2;
               if (caps[cid] < 128) caps[cid] = 128;
-              states[cid] = realloc(states[cid], caps[cid] * sizeof(SCharacterCore));
+              states[cid] = (SCharacterCore *)realloc(states[cid], caps[cid] * sizeof(SCharacterCore));
+              inputs[cid] = (SPlayerInput *)realloc(inputs[cid], caps[cid] * sizeof(SPlayerInput));
               memset(states[cid] + old_cap, 0, (caps[cid] - old_cap) * sizeof(SCharacterCore));
-              inputs[cid] = realloc(inputs[cid], caps[cid] * sizeof(SPlayerInput));
               memset(inputs[cid] + old_cap, 0, (caps[cid] - old_cap) * sizeof(SPlayerInput));
             }
-
             if (item_type == DD_NETOBJTYPE_CLIENTINFO) {
               const dd_netobj_client_info *ci = (const dd_netobj_client_info *)dd_snap_item_data(item);
               ints_to_str(ci->m_aName, 4, player_names[cid], 16);
@@ -718,7 +732,6 @@ int import_demo(ui_handler_t *ui, const char *path) {
               inp->m_Hook = pi->m_Hook;
               inp->m_WantedWeapon = pi->m_WantedWeapon;
 
-              // Also copy to the physics player input so it's initialized correctly for the next tick!
               dr->phys.players[cid].input.m_Direction = pi->m_Direction;
               dr->phys.players[cid].input.m_TargetX = pi->m_TargetX;
               dr->phys.players[cid].input.m_TargetY = pi->m_TargetY;
@@ -730,7 +743,6 @@ int import_demo(ui_handler_t *ui, const char *path) {
               dr->phys.players[cid].input.m_NextWeapon = pi->m_NextWeapon;
               dr->phys.players[cid].input.m_PrevWeapon = pi->m_PrevWeapon;
 
-              // Update CharacterCore input too
               SCharacterCore *c = &states[cid][last_processed_norm_tick];
               c->m_Input = *inp;
 
@@ -883,6 +895,9 @@ int import_demo(ui_handler_t *ui, const char *path) {
     ui->timeline.selected_player_track_index = 0;
   }
 
+  printf("tracks_added: %d\n", tracks_added);
+  fflush(stdout);
+  exit(0);
   return tracks_added > 0 ? 0 : -1;
 }
 

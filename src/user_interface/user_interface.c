@@ -298,8 +298,15 @@ void render_player_manager(ui_handler_t *ui) {
         ts->selected_player_track_index = i;
       }
 
-      if (i < world.m_NumCharacters && world.m_pCharacters[i].m_FinishTick > 0) {
-        int ticks = world.m_pCharacters[i].m_FinishTick - world.m_pCharacters[i].m_StartTick;
+      SCharacterCore demo_char;
+      SCharacterCore *p = NULL;
+      if (model_get_character_at_tick(ts, i, ts->current_tick, &demo_char)) {
+        p = &demo_char;
+      } else if (i < world.m_NumCharacters) {
+        p = &world.m_pCharacters[i];
+      }
+      if (p && p->m_FinishTick > 0) {
+        int ticks = p->m_FinishTick - p->m_StartTick;
         float time = (float)ticks / 50.f;
         int m = (int)time / 60;
         float s = time - (m * 60);
@@ -463,10 +470,30 @@ void ui_init(ui_handler_t *ui, gfx_handler_t *gfx_handler) {
   ui->pickup_positions = NULL;
 }
 
-static float lint2(float a, float b, float f) { return a + f * (b - a); }
 static void lerp(vec2 a, vec2 b, float f, vec2 out) {
-  out[0] = lint2(a[0], b[0], f);
-  out[1] = lint2(a[1], b[1], f);
+  float dx = b[0] - a[0];
+  float dy = b[1] - a[1];
+  float dist_sq = dx * dx + dy * dy;
+  if (dist_sq > 8.0f * 8.0f) { // 8 tiles (256 physics units)
+    out[0] = b[0];
+    out[1] = b[1];
+  } else {
+    out[0] = a[0] + f * dx;
+    out[1] = a[1] + f * dy;
+  }
+}
+
+static void lerp_physics(vec2 a, vec2 b, float f, vec2 out) {
+  float dx = b[0] - a[0];
+  float dy = b[1] - a[1];
+  float dist_sq = dx * dx + dy * dy;
+  if (dist_sq > 256.0f * 256.0f) { // 256 physics units
+    out[0] = b[0];
+    out[1] = b[1];
+  } else {
+    out[0] = a[0] + f * dx;
+    out[1] = a[1] + f * dy;
+  }
 }
 
 static void process_net_events(ui_handler_t *ui) {
@@ -492,42 +519,304 @@ static void process_net_events(ui_handler_t *ui) {
   ts->last_event_scan_tick = ts->current_tick;
 }
 
-void render_players(ui_handler_t *ui) {
+static void render_player_demo(ui_handler_t *ui, SWorldCore *world, SWorldCore *prev_world, int i, float intra, SCharacterCore *core) {
   gfx_handler_t *gfx = ui->gfx_handler;
-  physics_handler_t *ph = &gfx->physics_handler;
-  if (!ph->loaded) return;
 
-  SWorldCore prev_world = wc_empty();
-  SWorldCore world = wc_empty();
+  vec2 ppp = {vgetx(core->m_PrevPos) / 32.f, vgety(core->m_PrevPos) / 32.f};
+  vec2 pp = {vgetx(core->m_Pos) / 32.f, vgety(core->m_Pos) / 32.f};
+  vec2 p;
+  lerp(ppp, pp, intra, p);
 
-  // Get the world state at the current tick. The model handles caching internally.
-  model_get_world_state_at_tick(&ui->timeline, ui->timeline.current_tick - 1, &prev_world, true);
-  model_get_world_state_at_tick(&ui->timeline, ui->timeline.current_tick, &world, true);
+  anim_state_t anim_state;
+  anim_state_set(&anim_state, &anim_base, 0.0f);
 
-  if (ui->timeline.player_track_count != world.m_NumCharacters) {
-    wc_free(&prev_world);
-    wc_free(&world);
-    return;
+  bool stationary = fabsf(vgetx(core->m_Vel) * 256.f) <= 1;
+  bool running = fabsf(vgetx(core->m_Vel) * 256.f) >= 5000;
+  bool want_other_dir = (core->m_Input.m_Direction == -1 && vgetx(core->m_Vel) > 0) || (core->m_Input.m_Direction == 1 && vgetx(core->m_Vel) < 0);
+  bool inactive = get_flag_sit(&core->m_Input);
+
+  bool in_air = true;
+  if (world->m_pCollision) {
+    int block_idx = (int)(vgety(core->m_Pos) / 32) * world->m_pCollision->m_MapData.width + (int)(vgetx(core->m_Pos) / 32);
+    if (block_idx >= 0 && block_idx < world->m_pCollision->m_MapData.width * world->m_pCollision->m_MapData.height) {
+      in_air = !(world->m_pCollision->m_pTileInfos[block_idx] & INFO_CANGROUND) ||
+               !(check_point(world->m_pCollision, vec2_init(vgetx(core->m_Pos), vgety(core->m_Pos) + 16)));
+    }
   }
 
-  float speed_scale = ui->timeline.is_reversing ? 2.0f : 1.0f;
-  float intra = fminf((igGetTime() - ui->timeline.last_update_time) / (1.f / (ui->timeline.playback_speed * speed_scale)), 1.f);
-  if (ui->timeline.is_reversing) intra = 1.f - intra;
+  float attack_ticks_passed = (world->m_GameTick - core->m_AttackTick) + intra;
+  float last_attack_time = attack_ticks_passed / (float)GAME_TICK_SPEED;
 
-  if (ui->timeline.recording) {
-    SCharacterCore *core = &world.m_pCharacters[gfx->user_interface.timeline.selected_player_track_index];
-    vec2 ppp = {vgetx(core->m_PrevPos) / 32.f, vgety(core->m_PrevPos) / 32.f};
-    vec2 pp = {vgetx(core->m_Pos) / 32.f, vgety(core->m_Pos) / 32.f};
-    vec2 p;
-    lerp(ppp, pp, intra, p);
+  float walk_time = fmod(p[0] * 32.f, 100.0f) / 100.0f;
+  float run_time = fmod(p[0] * 32.f, 200.0f) / 200.0f;
+  if (walk_time < 0.0f) walk_time += 1.0f;
+  if (run_time < 0.0f) run_time += 1.0f;
 
-    glm_vec2_copy(p, ui->last_render_pos);
-    ui->gfx_handler->renderer.camera.pos[0] = (p[0]) / ui->gfx_handler->map_data->width;
-    ui->gfx_handler->renderer.camera.pos[1] = (p[1]) / ui->gfx_handler->map_data->height;
+  if (in_air) anim_state_add(&anim_state, &anim_inair, 0.0f, 1.0f);
+  else if (stationary) {
+    if (inactive) anim_state_add(&anim_state, core->m_Input.m_Direction < 0 ? &anim_sit_left : &anim_sit_right, 0.0f, 1.0f);
+    else anim_state_add(&anim_state, &anim_idle, 0.0f, 1.0f);
+  } else if (!want_other_dir) {
+    if (running) anim_state_add(&anim_state, vgetx(core->m_Vel) < 0.0f ? &anim_run_left : &anim_run_right, run_time, 1.0f);
+    else anim_state_add(&anim_state, &anim_walk, walk_time, 1.0f);
+  }
+  if (core->m_ActiveWeapon == WEAPON_HAMMER)
+    anim_state_add(&anim_state, &anim_hammer_swing, last_attack_time * 5.f, 1.0f);
+  if (core->m_ActiveWeapon == WEAPON_NINJA)
+    anim_state_add(&anim_state, &anim_ninja_swing, last_attack_time * 2.f, 1.0f);
+
+  vec2 dir;
+  if (ui->timeline.recording && i == ui->timeline.selected_player_track_index) {
+    dir[0] = ui->recording_mouse_pos[0];
+    dir[1] = ui->recording_mouse_pos[1];
+  } else {
+    dir[0] = core->m_Input.m_TargetX;
+    dir[1] = core->m_Input.m_TargetY;
   }
 
-  for (int i = 0; i < world.m_NumCharacters; ++i) {
-    SCharacterCore *core = &world.m_pCharacters[i];
+  glm_vec2_normalize(dir);
+  player_info_t *info = &ui->timeline.player_tracks[i].player_info;
+  int skin = info->skin;
+  int eye = get_flag_eye_state(&core->m_Input);
+  vec3 feet_col = {1.f, 1.f, 1.f};
+  vec3 body_col = {0.0f, 0.0f, 0.0f};
+  bool custom_col = info->use_custom_color;
+
+  if (core->m_FreezeTime > 0 || core->m_ActiveWeapon == WEAPON_NINJA) {
+    skin = gfx->x_ninja_skin;
+    if (core->m_FreezeTime > 0 && eye == 0) eye = EYE_BLINK;
+    custom_col = false;
+  }
+
+  if (custom_col) {
+    packed_hsl_to_rgb(info->color_body, body_col);
+    packed_hsl_to_rgb(info->color_feet, feet_col);
+  }
+  if (core->m_JumpedTotal >= core->m_Jumps - 1) {
+    if (custom_col) {
+      feet_col[0] *= 0.5f;
+      feet_col[1] *= 0.5f;
+      feet_col[2] *= 0.5f;
+    } else {
+      feet_col[0] = 0.5f;
+    }
+  }
+
+  renderer_submit_skin(gfx, Z_LAYER_SKINS, p, 1.0f, skin, eye, dir, &anim_state, body_col, feet_col, custom_col);
+
+  if (!ui->timeline.recording && i == ui->timeline.selected_player_track_index) {
+    vec2 min_pos = {p[0] - 1.0f, p[1] - 1.0f};
+    vec4 red_col = {1.0f, 0.0f, 0.0f, 1.0f};
+    vec2 p1 = {min_pos[0], min_pos[1]};
+    vec2 p2 = {min_pos[0] + 2.0f, min_pos[1]};
+    vec2 p3 = {min_pos[0] + 2.0f, min_pos[1] + 2.0f};
+    vec2 p4 = {min_pos[0], min_pos[1] + 2.0f};
+
+    renderer_submit_line(gfx, Z_LAYER_PREDICTION_LINES, p1, p2, red_col, 0.05f);
+    renderer_submit_line(gfx, Z_LAYER_PREDICTION_LINES, p2, p3, red_col, 0.05f);
+    renderer_submit_line(gfx, Z_LAYER_PREDICTION_LINES, p3, p4, red_col, 0.05f);
+    renderer_submit_line(gfx, Z_LAYER_PREDICTION_LINES, p4, p1, red_col, 0.05f);
+  }
+  if (ui->center_dot && world->m_pCollision) {
+    int idx = (int)p[1] * world->m_pCollision->m_MapData.width + (int)p[0];
+    if (idx >= 0 && idx < world->m_pCollision->m_MapData.width * world->m_pCollision->m_MapData.height) {
+      bool freeze = world->m_pCollision->m_MapData.game_layer.data[idx] == TILE_FREEZE;
+      if (!freeze && world->m_pCollision->m_MapData.front_layer.data && world->m_pCollision->m_MapData.front_layer.data[idx] == TILE_FREEZE)
+        freeze = true;
+      renderer_submit_circle_filled(gfx, Z_LAYER_PREDICTION_LINES + 1.0f, p, 2.f / 32.f, freeze ? (vec4){0, 0, 1, 1} : (vec4){0, 1, 0, 1}, 4);
+    }
+  }
+
+  SCharacterCore demo_prev_core;
+  SCharacterCore *prev_core = NULL;
+  if (model_get_character_at_tick(&ui->timeline, i, ui->timeline.current_tick - 1, &demo_prev_core)) {
+    prev_core = &demo_prev_core;
+  } else {
+    prev_core = &prev_world->m_pCharacters[i];
+  }
+  // render hook
+  if (core->m_HookState >= 1 && (prev_core->m_HookState != HOOK_IDLE || intra > 0.25)) {
+    vec2 hook_pos;
+    {
+      vec2 __ = {vgetx(prev_core->m_HookPos) / 32.f, vgety(prev_core->m_HookPos) / 32.f};
+      vec2 _ = {vgetx(core->m_HookPos) / 32.f, vgety(core->m_HookPos) / 32.f};
+      if (core->m_HookedPlayer != -1 && core->m_HookedPlayer >= 0 && core->m_HookedPlayer < world->m_NumCharacters) {
+        SCharacterCore demo_hooked;
+        SCharacterCore *hooked = NULL;
+        if (model_get_character_at_tick(&ui->timeline, core->m_HookedPlayer, ui->timeline.current_tick, &demo_hooked)) {
+          hooked = &demo_hooked;
+        } else {
+          hooked = &world->m_pCharacters[core->m_HookedPlayer];
+        }
+        __[0] = vgetx(hooked->m_PrevPos) / 32.f;
+        __[1] = vgety(hooked->m_PrevPos) / 32.f;
+        _[0] = vgetx(hooked->m_Pos) / 32.f;
+        _[1] = vgety(hooked->m_Pos) / 32.f;
+      }
+      lerp(__, _, intra, hook_pos);
+    }
+
+    vec2 direction;
+    glm_vec2_sub(hook_pos, p, direction);
+    float length = glm_vec2_norm(direction);
+    glm_vec2_normalize(direction);
+    float angle = atan2f(-direction[1], direction[0]);
+
+    if (length > 0) {
+      vec2 center_pos;
+      center_pos[0] = p[0] + direction[0] * (length - 0.5f) * 0.5f;
+      center_pos[1] = p[1] + direction[1] * (length - 0.5f) * 0.5f;
+      vec2 chain_size = {-length + 0.5f, 0.5};
+      renderer_submit_atlas(gfx, &gfx->renderer.gameskin_renderer, Z_LAYER_HOOK, center_pos, chain_size, angle, GAMESKIN_HOOK_CHAIN, true, (vec4){1.0f, 1.0f, 1.0f, 1.0f}, false);
+    }
+    sprite_definition_t *head_sprite_def = &gfx->renderer.gameskin_renderer.sprite_definitions[GAMESKIN_HOOK_HEAD];
+    vec2 head_size = {(float)head_sprite_def->w / 64.0f, (float)head_sprite_def->h / 64.0f};
+    renderer_submit_atlas(gfx, &gfx->renderer.gameskin_renderer, Z_LAYER_HOOK, hook_pos, head_size, angle, GAMESKIN_HOOK_HEAD, false, (vec4){1.0f, 1.0f, 1.0f, 1.0f}, false);
+  }
+  if (!core->m_FreezeTime && core->m_ActiveWeapon < NUM_WEAPONS) {
+    const weapon_spec_t *spec = &game_data.weapons.id[core->m_ActiveWeapon];
+    float aim_angle = atan2f(-dir[1], dir[0]);
+
+    bool is_sit = inactive && !in_air && stationary;
+    float flip_factor = (dir[0] < 0.0f) ? -1.0f : 1.0f;
+
+    vec2 phys_pos_prev = {vgetx(core->m_PrevPos), vgety(core->m_PrevPos)};
+    vec2 phys_pos_curr = {vgetx(core->m_Pos), vgety(core->m_Pos)};
+    vec2 phys_pos;
+    lerp_physics(phys_pos_prev, phys_pos_curr, intra, phys_pos);
+
+    vec2 weapon_pos;
+    glm_vec2_copy(phys_pos, weapon_pos);
+
+    float anim_attach_angle_rad = anim_state.attach.angle * (2.0f * M_PI);
+    float weapon_angle = anim_attach_angle_rad + aim_angle;
+
+    int weapon_sprite_id = -1;
+
+    if (core->m_ActiveWeapon == WEAPON_HAMMER) {
+      weapon_sprite_id = GAMESKIN_HAMMER_BODY;
+      weapon_pos[0] += anim_state.attach.x;
+      weapon_pos[1] += anim_state.attach.y;
+      weapon_pos[1] += spec->offsety;
+      if (dir[0] < 0.0f) weapon_pos[0] -= spec->offsetx;
+      if (is_sit) weapon_pos[1] += 3.0f;
+
+      if (!inactive) {
+        anim_attach_angle_rad = anim_state.attach.angle * (2.0f * M_PI);
+        weapon_angle = M_PI / 2.0f - flip_factor * anim_attach_angle_rad;
+      } else {
+        weapon_angle = dir[0] < 0.0 ? 100.f : 500.f;
+      }
+    } else if (core->m_ActiveWeapon == WEAPON_NINJA) {
+      weapon_sprite_id = GAMESKIN_NINJA_BODY;
+      weapon_pos[1] += spec->offsety;
+      if (is_sit) weapon_pos[1] += 3.0f;
+      if (dir[0] < 0.0f) weapon_pos[0] -= spec->offsetx;
+
+      anim_attach_angle_rad = anim_state.attach.angle * (2.0f * M_PI);
+      weapon_angle = -M_PI / 2.0f + flip_factor * anim_attach_angle_rad;
+
+      float attack_time_sec = attack_ticks_passed / (float)GAME_TICK_SPEED;
+      if (attack_time_sec <= 1.0f / 6.0f && spec->num_muzzles > 0) {
+        int muzzle_idx = world->m_GameTick % spec->num_muzzles;
+        vec2 hadoken_dir = {vgetx(core->m_Pos) - vgetx(prev_core->m_Pos), vgety(core->m_Pos) - vgety(prev_core->m_Pos)};
+        if (glm_vec2_norm2(hadoken_dir) < 0.0001f) {
+          hadoken_dir[0] = 1.0f;
+          hadoken_dir[1] = 0.0f;
+        }
+        glm_vec2_normalize(hadoken_dir);
+
+        float hadoken_angle = atan2f(-hadoken_dir[1], hadoken_dir[0]);
+        vec2 muzzle_phys_pos;
+        glm_vec2_copy(phys_pos, muzzle_phys_pos);
+        muzzle_phys_pos[0] -= hadoken_dir[0] * spec->muzzleoffsetx;
+        muzzle_phys_pos[1] -= hadoken_dir[1] * spec->muzzleoffsetx;
+
+        int muzzle_sprite_id = GAMESKIN_NINJA_MUZZLE1 + muzzle_idx;
+        sprite_definition_t *muzzle_sprite_def = &gfx->renderer.gameskin_renderer.sprite_definitions[muzzle_sprite_id];
+        float f = sqrtf(powf(muzzle_sprite_def->w, 2) + powf(muzzle_sprite_def->h, 2));
+        float scaleX = muzzle_sprite_def->w / f;
+        float scaleY = muzzle_sprite_def->h / f;
+        vec2 muzzle_size = {160.0f * scaleX / 32.0f, 160.0f * scaleY / 32.0f};
+
+        vec2 render_pos = {muzzle_phys_pos[0] / 32.0f, muzzle_phys_pos[1] / 32.0f};
+        renderer_submit_atlas(gfx, &gfx->renderer.gameskin_renderer, Z_LAYER_WEAPONS, render_pos, muzzle_size, hadoken_angle, muzzle_sprite_id, false, (vec4){1.0f, 1.0f, 1.0f, 1.0f}, false);
+      }
+    } else {
+      switch (core->m_ActiveWeapon) {
+      case WEAPON_GUN:
+        weapon_sprite_id = GAMESKIN_GUN_BODY;
+        break;
+      case WEAPON_SHOTGUN:
+        weapon_sprite_id = GAMESKIN_SHOTGUN_BODY;
+        break;
+      case WEAPON_GRENADE:
+        weapon_sprite_id = GAMESKIN_GRENADE_BODY;
+        break;
+      case WEAPON_LASER:
+        weapon_sprite_id = GAMESKIN_LASER_BODY;
+        break;
+  }
+
+      float recoil = 0.0f;
+      float a = attack_ticks_passed / 5.0f;
+      if (a < 1.0f) recoil = sinf(a * M_PI);
+
+      weapon_pos[0] += dir[0] * (spec->offsetx - recoil * 10.0f);
+      weapon_pos[1] += dir[1] * (spec->offsetx - recoil * 10.0f);
+      weapon_pos[1] += spec->offsety;
+
+      if (is_sit) weapon_pos[1] += 3.0f;
+
+      if ((core->m_ActiveWeapon == WEAPON_GUN || core->m_ActiveWeapon == WEAPON_SHOTGUN) && spec->num_muzzles > 0) {
+        if (attack_ticks_passed > 0 && attack_ticks_passed < spec->muzzleduration + 3.0f) {
+          int muzzle_idx = world->m_GameTick % spec->num_muzzles;
+          vec2 muzzle_dir_y = {-dir[1], dir[0]};
+          float offset_y = -spec->muzzleoffsety * flip_factor;
+
+          vec2 muzzle_phys_pos;
+          glm_vec2_copy(weapon_pos, muzzle_phys_pos);
+          muzzle_phys_pos[0] += dir[0] * spec->muzzleoffsetx + muzzle_dir_y[0] * offset_y;
+          muzzle_phys_pos[1] += dir[1] * spec->muzzleoffsetx + muzzle_dir_y[1] * offset_y;
+
+          int muzzle_sprite_id = (core->m_ActiveWeapon == WEAPON_GUN ? GAMESKIN_GUN_MUZZLE1 : GAMESKIN_SHOTGUN_MUZZLE1) + muzzle_idx;
+
+          float w = 96.0f, h = 64.0f;
+          float f = sqrtf(w * w + h * h);
+          float scale_x = w / f;
+          float scale_y = h / f;
+
+          vec2 muzzle_size;
+          muzzle_size[0] = spec->visual_size * scale_x * (4.0f / 3.0f) / 32.0f;
+          muzzle_size[1] = spec->visual_size * scale_y / 32.0f;
+          muzzle_size[1] *= flip_factor;
+
+          vec2 render_pos = {muzzle_phys_pos[0] / 32.0f, muzzle_phys_pos[1] / 32.0f};
+          renderer_submit_atlas(gfx, &gfx->renderer.gameskin_renderer, Z_LAYER_WEAPONS, render_pos, muzzle_size, weapon_angle, muzzle_sprite_id, false, (vec4){1.0f, 1.0f, 1.0f, 1.0f}, false);
+        }
+      }
+    }
+
+    if (weapon_sprite_id != -1) {
+      sprite_definition_t *sprite_def = &gfx->renderer.gameskin_renderer.sprite_definitions[weapon_sprite_id];
+      float w = sprite_def->w;
+      float h = sprite_def->h;
+      float f = sqrtf(w * w + h * h);
+      float scaleX = w / f;
+      float scaleY = h / f;
+
+      vec2 weapon_size = {spec->visual_size * scaleX / 32.0f, spec->visual_size * scaleY / 32.0f};
+      weapon_size[1] *= flip_factor;
+
+      vec2 render_pos = {weapon_pos[0] / 32.0f, weapon_pos[1] / 32.0f};
+
+      renderer_submit_atlas(gfx, &gfx->renderer.gameskin_renderer, Z_LAYER_WEAPONS, render_pos, weapon_size, weapon_angle, weapon_sprite_id, false, (vec4){1.0f, 1.0f, 1.0f, 1.0f}, false);
+    }
+  }
+}
+
+static void render_player_physics(ui_handler_t *ui, SWorldCore *world, SWorldCore *prev_world, int i, float intra, SCharacterCore *core) {
+  gfx_handler_t *gfx = ui->gfx_handler;
 
     vec2 ppp = {vgetx(core->m_PrevPos) / 32.f, vgety(core->m_PrevPos) / 32.f};
     vec2 pp = {vgetx(core->m_Pos) / 32.f, vgety(core->m_Pos) / 32.f};
@@ -541,9 +830,11 @@ void render_players(ui_handler_t *ui) {
     bool running = fabsf(vgetx(core->m_Vel) * 256.f) >= 5000;
     bool want_other_dir = (core->m_Input.m_Direction == -1 && vgetx(core->m_Vel) > 0) || (core->m_Input.m_Direction == 1 && vgetx(core->m_Vel) < 0);
     bool inactive = get_flag_sit(&core->m_Input);
+
     bool in_air = !(core->m_pCollision->m_pTileInfos[core->m_BlockIdx] & INFO_CANGROUND) ||
                   !(check_point(core->m_pCollision, vec2_init(vgetx(core->m_Pos), vgety(core->m_Pos) + 16)));
-    float attack_ticks_passed = (world.m_GameTick - core->m_AttackTick) + intra;
+
+  float attack_ticks_passed = (world->m_GameTick - core->m_AttackTick) + intra;
     float last_attack_time = attack_ticks_passed / (float)GAME_TICK_SPEED;
 
     float walk_time = fmod(p[0] * 32.f, 100.0f) / 100.0f;
@@ -604,7 +895,6 @@ void render_players(ui_handler_t *ui) {
     renderer_submit_skin(gfx, Z_LAYER_SKINS, p, 1.0f, skin, eye, dir, &anim_state, body_col, feet_col, custom_col);
 
     if (!ui->timeline.recording && i == ui->timeline.selected_player_track_index) {
-      // vec2 box_size = {2.0f, 2.0f};
       vec2 min_pos = {p[0] - 1.0f, p[1] - 1.0f};
       vec4 red_col = {1.0f, 0.0f, 0.0f, 1.0f};
       vec2 p1 = {min_pos[0], min_pos[1]};
@@ -617,25 +907,26 @@ void render_players(ui_handler_t *ui) {
       renderer_submit_line(gfx, Z_LAYER_PREDICTION_LINES, p3, p4, red_col, 0.05f);
       renderer_submit_line(gfx, Z_LAYER_PREDICTION_LINES, p4, p1, red_col, 0.05f);
     }
-    if (ui->center_dot) {
-      int idx = (int)p[1] * world.m_pCollision->m_MapData.width + (int)p[0];
-      bool freeze = world.m_pCollision->m_MapData.game_layer.data[idx] == TILE_FREEZE;
-      if (!freeze && world.m_pCollision->m_MapData.front_layer.data && world.m_pCollision->m_MapData.front_layer.data[idx] == TILE_FREEZE)
+  if (ui->center_dot && core->m_pCollision) {
+    int idx = (int)p[1] * core->m_pCollision->m_MapData.width + (int)p[0];
+    if (idx >= 0 && idx < core->m_pCollision->m_MapData.width * core->m_pCollision->m_MapData.height) {
+      bool freeze = core->m_pCollision->m_MapData.game_layer.data[idx] == TILE_FREEZE;
+      if (!freeze && core->m_pCollision->m_MapData.front_layer.data && core->m_pCollision->m_MapData.front_layer.data[idx] == TILE_FREEZE)
         freeze = true;
       renderer_submit_circle_filled(gfx, Z_LAYER_PREDICTION_LINES + 1.0f, p, 2.f / 32.f, freeze ? (vec4){0, 0, 1, 1} : (vec4){0, 1, 0, 1}, 4);
     }
+    }
 
-    SCharacterCore *prev_core = &prev_world.m_pCharacters[i];
+  SCharacterCore *prev_core = &prev_world->m_pCharacters[i];
+
     // render hook
     if (core->m_HookState >= 1 && (prev_core->m_HookState != HOOK_IDLE || intra > 0.25)) {
-
-      // do interpolation
       vec2 hook_pos;
       {
         vec2 __ = {vgetx(prev_core->m_HookPos) / 32.f, vgety(prev_core->m_HookPos) / 32.f};
         vec2 _ = {vgetx(core->m_HookPos) / 32.f, vgety(core->m_HookPos) / 32.f};
-        if (core->m_HookedPlayer != -1 && core->m_HookedPlayer >= 0 && core->m_HookedPlayer < world.m_NumCharacters) {
-          SCharacterCore *hooked = &world.m_pCharacters[core->m_HookedPlayer];
+      if (core->m_HookedPlayer != -1 && core->m_HookedPlayer >= 0 && core->m_HookedPlayer < world->m_NumCharacters) {
+        SCharacterCore *hooked = &world->m_pCharacters[core->m_HookedPlayer];
           __[0] = vgetx(hooked->m_PrevPos) / 32.f;
           __[1] = vgety(hooked->m_PrevPos) / 32.f;
           _[0] = vgetx(hooked->m_Pos) / 32.f;
@@ -668,13 +959,12 @@ void render_players(ui_handler_t *ui) {
       bool is_sit = inactive && !in_air && stationary;
       float flip_factor = (dir[0] < 0.0f) ? -1.0f : 1.0f;
 
-      // Start with interpolated physics position
       vec2 phys_pos_prev = {vgetx(core->m_PrevPos), vgety(core->m_PrevPos)};
       vec2 phys_pos_curr = {vgetx(core->m_Pos), vgety(core->m_Pos)};
       vec2 phys_pos;
-      lerp(phys_pos_prev, phys_pos_curr, intra, phys_pos);
+    lerp_physics(phys_pos_prev, phys_pos_curr, intra, phys_pos);
 
-      vec2 weapon_pos; // This will be in physics units until the end
+    vec2 weapon_pos;
       glm_vec2_copy(phys_pos, weapon_pos);
 
       float anim_attach_angle_rad = anim_state.attach.angle * (2.0f * M_PI);
@@ -707,8 +997,7 @@ void render_players(ui_handler_t *ui) {
 
         float attack_time_sec = attack_ticks_passed / (float)GAME_TICK_SPEED;
         if (attack_time_sec <= 1.0f / 6.0f && spec->num_muzzles > 0) {
-
-          int muzzle_idx = world.m_GameTick % spec->num_muzzles;
+        int muzzle_idx = world->m_GameTick % spec->num_muzzles;
           vec2 hadoken_dir = {vgetx(core->m_Pos) - vgetx(prev_core->m_Pos), vgety(core->m_Pos) - vgety(prev_core->m_Pos)};
           if (glm_vec2_norm2(hadoken_dir) < 0.0001f) {
             hadoken_dir[0] = 1.0f;
@@ -760,7 +1049,7 @@ void render_players(ui_handler_t *ui) {
 
         if ((core->m_ActiveWeapon == WEAPON_GUN || core->m_ActiveWeapon == WEAPON_SHOTGUN) && spec->num_muzzles > 0) {
           if (attack_ticks_passed > 0 && attack_ticks_passed < spec->muzzleduration + 3.0f) {
-            int muzzle_idx = world.m_GameTick % spec->num_muzzles;
+          int muzzle_idx = world->m_GameTick % spec->num_muzzles;
             vec2 muzzle_dir_y = {-dir[1], dir[0]};
             float offset_y = -spec->muzzleoffsety * flip_factor;
 
@@ -802,6 +1091,55 @@ void render_players(ui_handler_t *ui) {
 
         renderer_submit_atlas(gfx, &gfx->renderer.gameskin_renderer, Z_LAYER_WEAPONS, render_pos, weapon_size, weapon_angle, weapon_sprite_id, false, (vec4){1.0f, 1.0f, 1.0f, 1.0f}, false);
       }
+  }
+}
+
+void render_players(ui_handler_t *ui) {
+  gfx_handler_t *gfx = ui->gfx_handler;
+  physics_handler_t *ph = &gfx->physics_handler;
+  if (!ph->loaded) return;
+
+  SWorldCore prev_world = wc_empty();
+  SWorldCore world = wc_empty();
+
+  // Get the world state at the current tick. The model handles caching internally.
+  model_get_world_state_at_tick(&ui->timeline, ui->timeline.current_tick - 1, &prev_world, true);
+  model_get_world_state_at_tick(&ui->timeline, ui->timeline.current_tick, &world, true);
+
+  if (ui->timeline.player_track_count != world.m_NumCharacters) {
+    wc_free(&prev_world);
+    wc_free(&world);
+    return;
+  }
+
+  float speed_scale = ui->timeline.is_reversing ? 2.0f : 1.0f;
+  float intra = fminf((igGetTime() - ui->timeline.last_update_time) / (1.f / (ui->timeline.playback_speed * speed_scale)), 1.f);
+  if (ui->timeline.is_reversing) intra = 1.f - intra;
+
+  if (ui->timeline.recording || (ui->timeline.player_track_count > 0 && ui->timeline.selected_player_track_index >= 0 && !gfx->renderer.camera.is_dragging)) {
+    SCharacterCore demo_core;
+    SCharacterCore *core = NULL;
+    if (model_get_character_at_tick(&ui->timeline, gfx->user_interface.timeline.selected_player_track_index, ui->timeline.current_tick, &demo_core)) {
+      core = &demo_core;
+    } else {
+      core = &world.m_pCharacters[gfx->user_interface.timeline.selected_player_track_index];
+    }
+    vec2 ppp = {vgetx(core->m_PrevPos) / 32.f, vgety(core->m_PrevPos) / 32.f};
+    vec2 pp = {vgetx(core->m_Pos) / 32.f, vgety(core->m_Pos) / 32.f};
+    vec2 p;
+    lerp(ppp, pp, intra, p);
+
+    glm_vec2_copy(p, ui->last_render_pos);
+    ui->gfx_handler->renderer.camera.pos[0] = (p[0]) / ui->gfx_handler->map_data->width;
+    ui->gfx_handler->renderer.camera.pos[1] = (p[1]) / ui->gfx_handler->map_data->height;
+  }
+
+  for (int i = 0; i < world.m_NumCharacters; ++i) {
+    SCharacterCore demo_core;
+    if (model_get_character_at_tick(&ui->timeline, i, ui->timeline.current_tick, &demo_core)) {
+      render_player_demo(ui, &world, &prev_world, i, intra, &demo_core);
+    } else {
+      render_player_physics(ui, &world, &prev_world, i, intra, &world.m_pCharacters[i]);
     }
   }
   int id = 0;
@@ -835,7 +1173,13 @@ void render_players(ui_handler_t *ui) {
 
   ui->current_tick = world.m_GameTick;
   if (ui->timeline.selected_player_track_index >= 0) {
-    SCharacterCore *p = &world.m_pCharacters[ui->timeline.selected_player_track_index];
+    SCharacterCore demo_selected;
+    SCharacterCore *p = NULL;
+    if (model_get_character_at_tick(&ui->timeline, ui->timeline.selected_player_track_index, ui->timeline.current_tick, &demo_selected)) {
+      p = &demo_selected;
+    } else {
+      p = &world.m_pCharacters[ui->timeline.selected_player_track_index];
+    }
     ui->pos_x = vgetx(p->m_Pos) - 200 * 32;
     ui->pos_y = vgety(p->m_Pos) - 200 * 32;
     ui->vel_x = vgetx(p->m_Vel);
@@ -859,6 +1203,8 @@ void render_players(ui_handler_t *ui) {
 
   for (int i = 0; i < world.m_NumCharacters; ++i) {
     SCharacterCore *core = &world.m_pCharacters[i];
+    SCharacterCore dummy;
+    if (model_get_character_at_tick(&ui->timeline, i, ui->timeline.current_tick, &dummy)) continue;
     vec2 ppp = {vgetx(core->m_PrevPos) / 32.f, vgety(core->m_PrevPos) / 32.f};
     vec2 pp = {vgetx(core->m_Pos) / 32.f, vgety(core->m_Pos) / 32.f};
     vec2 p;
