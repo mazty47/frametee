@@ -92,9 +92,13 @@ jobs:
         cache: true
 
     - name: Configure CMake
-      run: cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
-        -DCMAKE_TOOLCHAIN_FILE=%CD%\vcpkg\scripts\buildsystems\vcpkg.cmake ^
-        -DVCPKG_TARGET_TRIPLET=x64-windows
+      shell: pwsh
+      run: |
+        $toolchain = "$env:GITHUB_WORKSPACE\vcpkg\scripts\buildsystems\vcpkg.cmake"
+        cmake -B build `
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo `
+          -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
+          -DVCPKG_TARGET_TRIPLET=x64-windows
 
     - name: Build
       run: cmake --build build --config RelWithDebInfo --parallel
