@@ -12,11 +12,23 @@
 #include <symbols.h>
 #include <system/include_cimgui.h>
 #include <system/skin/skin_fetch.h>
-#include <pthread.h>
 #include <stdatomic.h>
-#include <dirent.h>
 #include <math.h>
 #include <ctype.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#define strcasecmp _stricmp
+typedef HANDLE thread_t;
+#define THREAD_FUNC DWORD WINAPI
+#define THREAD_RETURN return 0
+#else
+#include <pthread.h>
+#include <dirent.h>
+typedef pthread_t thread_t;
+#define THREAD_FUNC void*
+#define THREAD_RETURN return NULL
+#endif
 
 static bool contains_case_insensitive(const char *haystack, const char *needle) {
   if (!needle || !needle[0]) return true;
@@ -89,6 +101,29 @@ static void add_browser_skin(const char *name, const char *path) {
 }
 
 static void scan_directory_for_skins(const char *path) {
+#ifdef _WIN32
+  WIN32_FIND_DATAA findFileData;
+  char search_path[1024];
+  snprintf(search_path, sizeof(search_path), "%s\\*", path);
+  HANDLE hFind = FindFirstFileA(search_path, &findFileData);
+  if (hFind == INVALID_HANDLE_VALUE) return;
+  do {
+    if (!(findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+      int len = strlen(findFileData.cFileName);
+      if (len > 4 && strcasecmp(findFileData.cFileName + len - 4, ".png") == 0) {
+        char skin_name[128];
+        strncpy(skin_name, findFileData.cFileName, sizeof(skin_name) - 1);
+        skin_name[sizeof(skin_name) - 1] = '\0';
+        skin_name[len - 4] = '\0';
+
+        char full_path[1024];
+        snprintf(full_path, sizeof(full_path), "%s\\%s", path, findFileData.cFileName);
+        add_browser_skin(skin_name, full_path);
+      }
+    }
+  } while (FindNextFileA(hFind, &findFileData) != 0);
+  FindClose(hFind);
+#else
   DIR *d = opendir(path);
   if (!d) return;
   struct dirent *dir;
@@ -108,6 +143,7 @@ static void scan_directory_for_skins(const char *path) {
     }
   }
   closedir(d);
+#endif
 }
 
 static bool g_skins_initialized = false;
@@ -126,19 +162,24 @@ typedef struct {
 } browser_load_task_t;
 
 static browser_load_task_t g_browser_load_tasks[MAX_BROWSER_LOAD_TASKS];
-static pthread_t g_browser_load_threads[MAX_BROWSER_LOAD_TASKS];
+static thread_t g_browser_load_threads[MAX_BROWSER_LOAD_TASKS];
 
-static void* browser_load_thread(void* arg) {
+static THREAD_FUNC browser_load_thread(void* arg) {
   browser_load_task_t* task = (browser_load_task_t*)arg;
   task->temp_skin_id = renderer_load_skin_from_file(task->h, task->path, &task->texture_res);
   task->done = true;
-  return NULL;
+  THREAD_RETURN;
 }
 
 static void refresh_skins(gfx_handler_t *h) {
   for (int i = 0; i < MAX_BROWSER_LOAD_TASKS; ++i) {
     if (g_browser_load_tasks[i].in_use) {
+#ifdef _WIN32
+      WaitForSingleObject(g_browser_load_threads[i], INFINITE);
+      CloseHandle(g_browser_load_threads[i]);
+#else
       pthread_join(g_browser_load_threads[i], NULL);
+#endif
       if (g_browser_load_tasks[i].done && g_browser_load_tasks[i].temp_skin_id >= 0) {
         if (h && g_browser_load_tasks[i].texture_res) {
           renderer_destroy_texture(h, g_browser_load_tasks[i].texture_res);
@@ -206,7 +247,12 @@ static void refresh_skins(gfx_handler_t *h) {
 void skin_browser_cleanup(gfx_handler_t *h) {
   for (int i = 0; i < MAX_BROWSER_LOAD_TASKS; ++i) {
     if (g_browser_load_tasks[i].in_use) {
+#ifdef _WIN32
+      WaitForSingleObject(g_browser_load_threads[i], INFINITE);
+      CloseHandle(g_browser_load_threads[i]);
+#else
       pthread_join(g_browser_load_threads[i], NULL);
+#endif
       if (g_browser_load_tasks[i].done && g_browser_load_tasks[i].temp_skin_id >= 0) {
         if (h && g_browser_load_tasks[i].texture_res) {
           renderer_destroy_texture(h, g_browser_load_tasks[i].texture_res);
@@ -344,7 +390,6 @@ void render_skin_browser(gfx_handler_t *h) {
     ImGuiListClipper *clipper = ImGuiListClipper_ImGuiListClipper();
     ImGuiListClipper_Begin(clipper, rows, -1.0f);
 
-    // Process finished load tasks
     for (int i = 0; i < MAX_BROWSER_LOAD_TASKS; ++i) {
       if (g_browser_load_tasks[i].in_use && g_browser_load_tasks[i].done) {
         browser_skin_t* bs_target = g_browser_load_tasks[i].target;
@@ -363,7 +408,12 @@ void render_skin_browser(gfx_handler_t *h) {
           bs_target->fetching = false;
         }
         g_browser_load_tasks[i].in_use = false;
+#ifdef _WIN32
+        WaitForSingleObject(g_browser_load_threads[i], INFINITE);
+        CloseHandle(g_browser_load_threads[i]);
+#else
         pthread_join(g_browser_load_threads[i], NULL);
+#endif
       }
     }
 
@@ -379,7 +429,6 @@ void render_skin_browser(gfx_handler_t *h) {
           bs->visible_this_frame = true;
 
           if (!bs->loaded && !bs->fetching) {
-            // Find a free load task
             for (int i = 0; i < MAX_BROWSER_LOAD_TASKS; ++i) {
               if (!g_browser_load_tasks[i].in_use) {
                 g_browser_load_tasks[i].in_use = true;
@@ -388,7 +437,11 @@ void render_skin_browser(gfx_handler_t *h) {
                 g_browser_load_tasks[i].h = h;
                 strncpy(g_browser_load_tasks[i].path, bs->path, sizeof(g_browser_load_tasks[i].path) - 1);
                 bs->fetching = true;
+#ifdef _WIN32
+                g_browser_load_threads[i] = CreateThread(NULL, 0, browser_load_thread, &g_browser_load_tasks[i], 0, NULL);
+#else
                 pthread_create(&g_browser_load_threads[i], NULL, browser_load_thread, &g_browser_load_tasks[i]);
+#endif
                 break;
               }
             }
