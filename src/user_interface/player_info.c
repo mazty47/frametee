@@ -10,9 +10,9 @@
 #include <system/include_cimgui.h>
 #include <user_interface/timeline/timeline_model.h>
 #include <system/skin/skin_fetch.h>
-#include <stdatomic.h>
 #include <symbols.h>
 #include <math.h>
+#include <stdbool.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -52,8 +52,8 @@ static void draw_spinning_icon(ImVec2 center, const char* icon_text) {
 typedef struct {
   char skin_name[64];
   char fetched_path[512];
-  atomic_bool done;
-  atomic_bool success;
+  bool done;
+  bool success;
   player_info_t* target;
 } skin_fetch_task_t;
 

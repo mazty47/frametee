@@ -12,9 +12,9 @@
 #include <symbols.h>
 #include <system/include_cimgui.h>
 #include <system/skin/skin_fetch.h>
-#include <stdatomic.h>
 #include <math.h>
 #include <ctype.h>
+#include <stdbool.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -153,8 +153,8 @@ static bool g_do_not_ask_again = false;
 #define MAX_BROWSER_LOAD_TASKS 4
 typedef struct {
   char path[512];
-  atomic_bool in_use;
-  atomic_bool done;
+  bool in_use;
+  bool done;
   browser_skin_t* target;
   texture_t* texture_res;
   int temp_skin_id;
