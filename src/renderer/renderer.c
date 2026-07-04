@@ -7,8 +7,27 @@
 #include <logger/logger.h>
 #include <stdint.h>
 #include <vulkan/vulkan_core.h>
-#include <pthread.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+static INIT_ONCE g_vulkan_mutex_once = INIT_ONCE_STATIC_INIT;
+static CRITICAL_SECTION g_vulkan_mutex;
+
+static BOOL CALLBACK init_vulkan_mutex_win(PINIT_ONCE InitOnce, PVOID Parameter, PVOID *Context) {
+    InitializeCriticalSection(&g_vulkan_mutex);
+    return TRUE;
+}
+
+void renderer_lock(void) {
+    InitOnceExecuteOnce(&g_vulkan_mutex_once, init_vulkan_mutex_win, NULL, NULL);
+    EnterCriticalSection(&g_vulkan_mutex);
+}
+
+void renderer_unlock(void) {
+    LeaveCriticalSection(&g_vulkan_mutex);
+}
+#else
+#include <pthread.h>
 static pthread_mutex_t g_vulkan_mutex;
 static pthread_once_t g_vulkan_mutex_once = PTHREAD_ONCE_INIT;
 
@@ -28,16 +47,17 @@ void renderer_lock(void) {
 void renderer_unlock(void) {
     pthread_mutex_unlock(&g_vulkan_mutex);
 }
+#endif
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
-#if defined(__GNUC__)
+#if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
 #endif
 #include "stb_image_resize2.h"
-#if defined(__GNUC__)
+#if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
 
@@ -50,7 +70,7 @@ static const char *LOG_SOURCE = "Renderer";
 #include <stdlib.h>
 #include <string.h>
 
-#define DYNAMIC_UBO_BUFFER_SIZE (16 * 1024 * 1024) // 16 MB
+#define DYNAMIC_UBO_BUFFER_SIZE (16 * 1024 * 1024)
 
 // helper function prototypes
 static uint32_t find_memory_type(VkPhysicalDevice physical_device, uint32_t type_filter, VkMemoryPropertyFlags properties);
@@ -58,29 +78,21 @@ static void create_buffer(gfx_handler_t *handler, VkDeviceSize size, VkBufferUsa
 static VkCommandBuffer begin_single_time_commands(gfx_handler_t *handler, VkCommandPool pool);
 static void end_single_time_commands(gfx_handler_t *handler, VkCommandPool pool, VkCommandBuffer command_buffer);
 static void copy_buffer(gfx_handler_t *handler, VkCommandPool pool, VkBuffer src_buffer, VkBuffer dst_buffer, VkDeviceSize size);
-
-static void transition_image_layout(gfx_handler_t *handler, VkCommandPool pool, VkImage image, VkFormat format, VkImageLayout old_layout,
-                                    VkImageLayout new_layout, uint32_t mip_levels, uint32_t base_layer, uint32_t layer_count);
+static void transition_image_layout(gfx_handler_t *handler, VkCommandPool pool, VkImage image, VkFormat format, VkImageLayout old_layout, VkImageLayout new_layout, uint32_t mip_levels, uint32_t base_layer, uint32_t layer_count);
 static void copy_buffer_to_image(gfx_handler_t *handler, VkCommandPool pool, VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
 static char *read_file(const char *filename, size_t *length);
 static VkShaderModule create_shader_module(gfx_handler_t *handler, const char *code, size_t code_size);
-static bool build_mipmaps(gfx_handler_t *handler, VkImage image, uint32_t width, uint32_t height, uint32_t mip_levels, uint32_t base_layer,
-                          uint32_t layer_count);
+static bool build_mipmaps(gfx_handler_t *handler, VkImage image, uint32_t width, uint32_t height, uint32_t mip_levels, uint32_t base_layer, uint32_t layer_count);
 static void flush_primitives(gfx_handler_t *handler, VkCommandBuffer command_buffer);
-static void renderer_init_atlas_renderer(gfx_handler_t *h, atlas_renderer_t *ar, const char *atlas_path, const sprite_definition_t *sprites,
-                                         uint32_t sprite_count, uint32_t max_instances);
+static void renderer_init_atlas_renderer(gfx_handler_t *h, atlas_renderer_t *ar, const char *atlas_path, const sprite_definition_t *sprites, uint32_t sprite_count, uint32_t max_instances);
 void renderer_cleanup_atlas_renderer(gfx_handler_t *h, atlas_renderer_t *ar);
 
-// vertex description helpers
 static VkVertexInputBindingDescription primitive_binding_description;
 static VkVertexInputAttributeDescription primitive_attribute_descriptions[2];
 static VkVertexInputBindingDescription mesh_binding_description;
 static VkVertexInputAttributeDescription mesh_attribute_descriptions[3];
-// skin instancing
 static VkVertexInputBindingDescription skin_binding_desc[2];
 static VkVertexInputAttributeDescription skin_attrib_descs[14];
-
-// atlas things
 static VkVertexInputBindingDescription atlas_binding_desc[2];
 static VkVertexInputAttributeDescription atlas_attrib_descs[9];
 
@@ -449,7 +461,6 @@ static bool build_mipmaps(gfx_handler_t *handler, VkImage image, uint32_t width,
 texture_t *renderer_create_texture_2d_array(gfx_handler_t *handler, uint32_t width, uint32_t height, uint32_t layer_count, VkFormat format) {
   renderer_state_t *renderer = &handler->renderer;
 
-  // find free slot
   uint32_t free_slot = (uint32_t)-1;
   for (uint32_t i = 0; i < MAX_TEXTURES; ++i) {
     if (!renderer->textures[i].active) {
@@ -472,25 +483,18 @@ texture_t *renderer_create_texture_2d_array(gfx_handler_t *handler, uint32_t wid
   texArray->layer_count = layer_count;
   strncpy(texArray->path, "runtime_skin_array", sizeof(texArray->path) - 1);
 
-  // Create the VkImage (2D array)
   create_image(handler, width, height, texArray->mip_levels, layer_count, format, VK_IMAGE_TILING_OPTIMAL,
                VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                &texArray->image, &texArray->memory);
 
-  // Transition all layers once
   transition_image_layout(handler, renderer->transfer_command_pool, texArray->image, format, VK_IMAGE_LAYOUT_UNDEFINED,
                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, texArray->mip_levels, 0, layer_count);
-  // Transition to shader read (empty until uploads)
   transition_image_layout(handler, renderer->transfer_command_pool, texArray->image, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, texArray->mip_levels, 0, layer_count);
 
-  // Create view as 2D array
   texArray->image_view = create_image_view(handler, texArray->image, format, VK_IMAGE_VIEW_TYPE_2D_ARRAY, texArray->mip_levels, layer_count);
-
-  // Create sampler
   texArray->sampler = create_texture_sampler(handler, texArray->mip_levels, VK_FILTER_LINEAR);
 
-  // log_info(LOG_SOURCE, "Created 2D texture array (%ux%u x %u layers)", width, height, layer_count);
   return texArray;
 }
 
@@ -499,7 +503,6 @@ int renderer_init(gfx_handler_t *handler) {
   memset(renderer, 0, sizeof(renderer_state_t));
   renderer->gfx = handler;
 
-  // Initialize the render queue
   renderer->queue.commands = malloc(sizeof(render_command_t) * MAX_RENDER_COMMANDS);
   renderer->queue.count = 0;
 
@@ -510,9 +513,8 @@ int renderer_init(gfx_handler_t *handler) {
   renderer->min_ubo_alignment = properties.limits.minUniformBufferOffsetAlignment;
 
   renderer->camera.zoom_wanted = 5.0f;
-  renderer->lod_bias = -0.5f; // Default bias
+  renderer->lod_bias = -0.5f;
 
-  // Initialize transient memory (128 MB)
   renderer->transient_capacity = 128 * 1024 * 1024;
   renderer->transient_memory = malloc(renderer->transient_capacity);
   renderer->transient_offset = 0;
@@ -524,7 +526,7 @@ int renderer_init(gfx_handler_t *handler) {
 
   VkDescriptorPoolSize pool_sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 100},
                                        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 100 * MAX_TEXTURES_PER_DRAW}};
-  for (int i = 0; i < 3; i++) { // triple buffering
+  for (int i = 0; i < 3; i++) {
     VkDescriptorPoolCreateInfo pool_create_info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
                                                    .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
                                                    .maxSets = 100,
@@ -537,7 +539,6 @@ int renderer_init(gfx_handler_t *handler) {
   strncpy(default_tex->path, "default_white", sizeof(default_tex->path) - 1);
   renderer->default_texture = default_tex;
 
-  // Primitive & UBO Ring Buffer Setup
   renderer->primitive_shader = renderer_load_shader(handler, "data/shaders/primitive.vert.spv", "data/shaders/primitive.frag.spv");
 
   create_buffer(handler, MAX_PRIMITIVE_VERTICES * sizeof(primitive_vertex_t), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
@@ -552,103 +553,55 @@ int renderer_init(gfx_handler_t *handler) {
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &renderer->dynamic_ubo_buffer);
   vkMapMemory(handler->g_device, renderer->dynamic_ubo_buffer.memory, 0, VK_WHOLE_SIZE, 0, &renderer->ubo_buffer_ptr);
 
-  // create a 2d array texture to hold max_skins atlases (each 512x512, rgba8)
   renderer->skin_manager.atlas_array = renderer_create_texture_2d_array(handler, 512, 512, MAX_SKINS, VK_FORMAT_R8G8B8A8_UNORM);
   memset(renderer->skin_manager.layer_used, 0, sizeof(renderer->skin_manager.layer_used));
-  // skin renderer
   renderer->skin_renderer.skin_shader = renderer_load_shader(handler, "data/shaders/skin.vert.spv", "data/shaders/skin.frag.spv");
 
-  // allocate big instance buffer
   create_buffer(handler, sizeof(skin_instance_t) * MAX_SKIN_INSTANCES, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &renderer->skin_renderer.instance_buffer);
   vkMapMemory(handler->g_device, renderer->skin_renderer.instance_buffer.memory, 0, VK_WHOLE_SIZE, 0, (void **)&renderer->skin_renderer.instance_ptr);
 
   renderer->skin_renderer.instance_count = 0;
 
-  // Game Skin Sprites (32x16 grid, 32px unit)
-  static sprite_definition_t gameskin_sprites[GAMESKIN_SPRITE_COUNT] = {[GAMESKIN_HAMMER_BODY] = {64, 32, 128, 96},
-                                                                        [GAMESKIN_GUN_BODY] = {64, 128, 128, 64},
-                                                                        [GAMESKIN_GUN_PROJ] = {192, 128, 64, 64},
-                                                                        [GAMESKIN_GUN_MUZZLE1] = {256, 128, 128, 64},
-                                                                        [GAMESKIN_GUN_MUZZLE2] = {384, 128, 128, 64},
-                                                                        [GAMESKIN_GUN_MUZZLE3] = {512, 128, 128, 64},
-                                                                        [GAMESKIN_SHOTGUN_BODY] = {64, 192, 256, 64},
-                                                                        [GAMESKIN_SHOTGUN_PROJ] = {320, 192, 64, 64},
-                                                                        [GAMESKIN_SHOTGUN_MUZZLE1] = {384, 192, 128, 64},
-                                                                        [GAMESKIN_SHOTGUN_MUZZLE2] = {512, 192, 128, 64},
-                                                                        [GAMESKIN_SHOTGUN_MUZZLE3] = {640, 192, 128, 64},
-                                                                        [GAMESKIN_GRENADE_BODY] = {64, 256, 224, 64},
-                                                                        [GAMESKIN_GRENADE_PROJ] = {320, 256, 64, 64},
-                                                                        [GAMESKIN_LASER_BODY] = {64, 384, 224, 96},
-                                                                        [GAMESKIN_LASER_PROJ] = {320, 384, 64, 64},
-                                                                        [GAMESKIN_NINJA_BODY] = {64, 320, 256, 64},
-                                                                        [GAMESKIN_NINJA_MUZZLE1] = {800, 0, 224, 128},
-                                                                        [GAMESKIN_NINJA_MUZZLE2] = {800, 128, 224, 128},
-                                                                        [GAMESKIN_NINJA_MUZZLE3] = {800, 256, 224, 128},
-                                                                        [GAMESKIN_HEALTH_FULL] = {672, 0, 64, 64},
-                                                                        [GAMESKIN_HEALTH_EMPTY] = {736, 0, 64, 64},
-                                                                        [GAMESKIN_ARMOR_FULL] = {672, 64, 64, 64},
-                                                                        [GAMESKIN_ARMOR_EMPTY] = {736, 64, 64, 64},
-                                                                        [GAMESKIN_HOOK_CHAIN] = {64, 0, 32, 32},
-                                                                        [GAMESKIN_HOOK_HEAD] = {96, 0, 64, 32},
-                                                                        [GAMESKIN_PARTICLE_0] = {192, 0, 32, 32},
-                                                                        [GAMESKIN_PARTICLE_1] = {192, 32, 32, 32},
-                                                                        [GAMESKIN_PARTICLE_2] = {224, 0, 32, 32},
-                                                                        [GAMESKIN_PARTICLE_3] = {224, 32, 32, 32},
-                                                                        [GAMESKIN_PARTICLE_4] = {256, 0, 32, 32},
-                                                                        [GAMESKIN_PARTICLE_5] = {256, 32, 32, 32},
-                                                                        [GAMESKIN_PARTICLE_6] = {288, 0, 64, 64},
-                                                                        [GAMESKIN_PARTICLE_7] = {352, 0, 64, 64},
-                                                                        [GAMESKIN_PARTICLE_8] = {416, 0, 64, 64},
-                                                                        [GAMESKIN_STAR_0] = {480, 0, 64, 64},
-                                                                        [GAMESKIN_STAR_1] = {544, 0, 64, 64},
-                                                                        [GAMESKIN_STAR_2] = {608, 0, 64, 64},
-                                                                        [GAMESKIN_PICKUP_HEALTH] = {320, 64, 64, 64},
-                                                                        [GAMESKIN_PICKUP_ARMOR] = {384, 64, 64, 64},
-                                                                        [GAMESKIN_PICKUP_HAMMER] = {64, 32, 128, 96},
-                                                                        [GAMESKIN_PICKUP_GUN] = {64, 128, 128, 64},
-                                                                        [GAMESKIN_PICKUP_SHOTGUN] = {64, 192, 256, 64},
-                                                                        [GAMESKIN_PICKUP_GRENADE] = {64, 256, 224, 64},
-                                                                        [GAMESKIN_PICKUP_LASER] = {64, 384, 224, 96},
-                                                                        [GAMESKIN_PICKUP_NINJA] = {64, 320, 256, 64},
-                                                                        [GAMESKIN_PICKUP_ARMOR_SHOTGUN] = {480, 64, 64, 64},
-                                                                        [GAMESKIN_PICKUP_ARMOR_GRENADE] = {544, 64, 64, 64},
-                                                                        [GAMESKIN_PICKUP_ARMOR_NINJA] = {320, 320, 64, 64},
-                                                                        [GAMESKIN_PICKUP_ARMOR_LASER] = {608, 64, 64, 64},
-                                                                        [GAMESKIN_FLAG_BLUE] = {384, 256, 128, 256},
-                                                                        [GAMESKIN_FLAG_RED] = {512, 256, 128, 256}};
+  static sprite_definition_t gameskin_sprites[GAMESKIN_SPRITE_COUNT] = {
+      [GAMESKIN_HAMMER_BODY] = {64, 32, 128, 96}, [GAMESKIN_GUN_BODY] = {64, 128, 128, 64}, [GAMESKIN_GUN_PROJ] = {192, 128, 64, 64},
+      [GAMESKIN_GUN_MUZZLE1] = {256, 128, 128, 64}, [GAMESKIN_GUN_MUZZLE2] = {384, 128, 128, 64}, [GAMESKIN_GUN_MUZZLE3] = {512, 128, 128, 64},
+      [GAMESKIN_SHOTGUN_BODY] = {64, 192, 256, 64}, [GAMESKIN_SHOTGUN_PROJ] = {320, 192, 64, 64}, [GAMESKIN_SHOTGUN_MUZZLE1] = {384, 192, 128, 64},
+      [GAMESKIN_SHOTGUN_MUZZLE2] = {512, 192, 128, 64}, [GAMESKIN_SHOTGUN_MUZZLE3] = {640, 192, 128, 64}, [GAMESKIN_GRENADE_BODY] = {64, 256, 224, 64},
+      [GAMESKIN_GRENADE_PROJ] = {320, 256, 64, 64}, [GAMESKIN_LASER_BODY] = {64, 384, 224, 96}, [GAMESKIN_LASER_PROJ] = {320, 384, 64, 64},
+      [GAMESKIN_NINJA_BODY] = {64, 320, 256, 64}, [GAMESKIN_NINJA_MUZZLE1] = {800, 0, 224, 128}, [GAMESKIN_NINJA_MUZZLE2] = {800, 128, 224, 128},
+      [GAMESKIN_NINJA_MUZZLE3] = {800, 256, 224, 128}, [GAMESKIN_HEALTH_FULL] = {672, 0, 64, 64}, [GAMESKIN_HEALTH_EMPTY] = {736, 0, 64, 64},
+      [GAMESKIN_ARMOR_FULL] = {672, 64, 64, 64}, [GAMESKIN_ARMOR_EMPTY] = {736, 64, 64, 64}, [GAMESKIN_HOOK_CHAIN] = {64, 0, 32, 32},
+      [GAMESKIN_HOOK_HEAD] = {96, 0, 64, 32}, [GAMESKIN_PARTICLE_0] = {192, 0, 32, 32}, [GAMESKIN_PARTICLE_1] = {192, 32, 32, 32},
+      [GAMESKIN_PARTICLE_2] = {224, 0, 32, 32}, [GAMESKIN_PARTICLE_3] = {224, 32, 32, 32}, [GAMESKIN_PARTICLE_4] = {256, 0, 32, 32},
+      [GAMESKIN_PARTICLE_5] = {256, 32, 32, 32}, [GAMESKIN_PARTICLE_6] = {288, 0, 64, 64}, [GAMESKIN_PARTICLE_7] = {352, 0, 64, 64},
+      [GAMESKIN_PARTICLE_8] = {416, 0, 64, 64}, [GAMESKIN_STAR_0] = {480, 0, 64, 64}, [GAMESKIN_STAR_1] = {544, 0, 64, 64},
+      [GAMESKIN_STAR_2] = {608, 0, 64, 64}, [GAMESKIN_PICKUP_HEALTH] = {320, 64, 64, 64}, [GAMESKIN_PICKUP_ARMOR] = {384, 64, 64, 64},
+      [GAMESKIN_PICKUP_HAMMER] = {64, 32, 128, 96}, [GAMESKIN_PICKUP_GUN] = {64, 128, 128, 64}, [GAMESKIN_PICKUP_SHOTGUN] = {64, 192, 256, 64},
+      [GAMESKIN_PICKUP_GRENADE] = {64, 256, 224, 64}, [GAMESKIN_PICKUP_LASER] = {64, 384, 224, 96}, [GAMESKIN_PICKUP_NINJA] = {64, 320, 256, 64},
+      [GAMESKIN_PICKUP_ARMOR_SHOTGUN] = {480, 64, 64, 64}, [GAMESKIN_PICKUP_ARMOR_GRENADE] = {544, 64, 64, 64},
+      [GAMESKIN_PICKUP_ARMOR_NINJA] = {320, 320, 64, 64}, [GAMESKIN_PICKUP_ARMOR_LASER] = {608, 64, 64, 64},
+      [GAMESKIN_FLAG_BLUE] = {384, 256, 128, 256}, [GAMESKIN_FLAG_RED] = {512, 256, 128, 256}
+  };
 
   renderer_init_atlas_renderer(handler, &renderer->gameskin_renderer, "data/textures/game.png", gameskin_sprites, GAMESKIN_SPRITE_COUNT, MAX_ATLAS_INSTANCES);
 
-  // Particles Sprites (8x8 grid, 64px unit)
   static sprite_definition_t particle_sprites[PARTICLE_SPRITE_COUNT] = {
-      [PARTICLE_SLICE] = {0, 0, 64, 64},         // 0,0
-      [PARTICLE_BALL] = {64, 0, 64, 64},         // 1,0
-      [PARTICLE_SPLAT01] = {128, 0, 64, 64},     // 2,0
-      [PARTICLE_SPLAT02] = {192, 0, 64, 64},     // 3,0
-      [PARTICLE_SPLAT03] = {256, 0, 64, 64},     // 4,0
-      [PARTICLE_SMOKE] = {0, 64, 64, 64},        // 0,1
-      [PARTICLE_SHELL] = {0, 128, 128, 128},     // 0,2 2x2
-      [PARTICLE_EXPL01] = {0, 256, 256, 256},    // 0,4 4x4
-      [PARTICLE_AIRJUMP] = {128, 128, 128, 128}, // 2,2 2x2
-      [PARTICLE_HIT01] = {256, 64, 128, 128}     // 4,1 2x2
+      [PARTICLE_SLICE] = {0, 0, 64, 64}, [PARTICLE_BALL] = {64, 0, 64, 64}, [PARTICLE_SPLAT01] = {128, 0, 64, 64},
+      [PARTICLE_SPLAT02] = {192, 0, 64, 64}, [PARTICLE_SPLAT03] = {256, 0, 64, 64}, [PARTICLE_SMOKE] = {0, 64, 64, 64},
+      [PARTICLE_SHELL] = {0, 128, 128, 128}, [PARTICLE_EXPL01] = {0, 256, 256, 256}, [PARTICLE_AIRJUMP] = {128, 128, 128, 128},
+      [PARTICLE_HIT01] = {256, 64, 128, 128}
   };
   renderer_init_atlas_renderer(handler, &renderer->particle_renderer, "data/textures/particles.png", particle_sprites, PARTICLE_SPRITE_COUNT, MAX_ATLAS_INSTANCES);
 
-  // Extras Sprites (16x16 grid, 32px unit)
   static sprite_definition_t extra_sprites[EXTRA_SPRITE_COUNT] = {
-      [EXTRA_SNOWFLAKE] = {0, 0, 64, 64}, // 0,0 2x2
-      [EXTRA_SPARKLE] = {64, 0, 64, 64},  // 2,0 2x2
-      [EXTRA_PULLEY] = {128, 0, 32, 32},  // 4,0 1x1
-      [EXTRA_HECTAGON] = {192, 0, 64, 64} // 6,0 2x2
+      [EXTRA_SNOWFLAKE] = {0, 0, 64, 64}, [EXTRA_SPARKLE] = {64, 0, 64, 64}, [EXTRA_PULLEY] = {128, 0, 32, 32}, [EXTRA_HECTAGON] = {192, 0, 64, 64}
   };
   renderer_init_atlas_renderer(handler, &renderer->extras_renderer, "data/textures/extras.png", extra_sprites, EXTRA_SPRITE_COUNT, MAX_ATLAS_INSTANCES);
 
-  // Initialize cursor renderer (using gameskin)
   static sprite_definition_t cursor_sprites[CURSOR_SPRITE_COUNT + 1] = {
       [CURSOR_HAMMER] = {0, 0, 64, 64}, [CURSOR_GUN] = {0, 128, 64, 64}, [CURSOR_SHOTGUN] = {0, 192, 64, 64}, [CURSOR_GRENADE] = {0, 256, 64, 64}, [CURSOR_LASER] = {0, 384, 64, 64}, [CURSOR_NINJA] = {0, 320, 64, 64}};
-  renderer_init_atlas_renderer(handler, &renderer->cursor_renderer, "data/textures/game.png", cursor_sprites, CURSOR_SPRITE_COUNT,
-                               1); // we only render a single cursor
+  renderer_init_atlas_renderer(handler, &renderer->cursor_renderer, "data/textures/game.png", cursor_sprites, CURSOR_SPRITE_COUNT, 1);
 
   log_info(LOG_SOURCE, "Renderer initialized successfully.");
   return 0;
@@ -669,11 +622,11 @@ void renderer_cleanup(gfx_handler_t *handler) {
   for (uint32_t i = 0; i < MAX_SHADERS; ++i) {
     for (uint32_t j = 0; j < 2; j++) {
       pipeline_cache_entry_t *entry = &renderer->pipeline_cache[i][j];
-    if (entry->initialized) {
-      vkDestroyPipeline(device, entry->pipeline, allocator);
-      vkDestroyPipelineLayout(device, entry->pipeline_layout, allocator);
-      vkDestroyDescriptorSetLayout(device, entry->descriptor_set_layout, allocator);
-    }
+      if (entry->initialized) {
+        vkDestroyPipeline(device, entry->pipeline, allocator);
+        vkDestroyPipelineLayout(device, entry->pipeline_layout, allocator);
+        vkDestroyDescriptorSetLayout(device, entry->descriptor_set_layout, allocator);
+      }
     }
   }
 
@@ -722,7 +675,6 @@ void renderer_cleanup(gfx_handler_t *handler) {
   }
   vkDestroyCommandPool(device, renderer->transfer_command_pool, allocator);
 
-  // free skin instance buffer
   if (renderer->skin_renderer.instance_buffer.buffer) {
     vkDestroyBuffer(device, renderer->skin_renderer.instance_buffer.buffer, allocator);
     vkFreeMemory(device, renderer->skin_renderer.instance_buffer.memory, allocator);
@@ -744,7 +696,7 @@ static pipeline_cache_entry_t *get_or_create_pipeline(gfx_handler_t *handler, sh
   if (!shader) return NULL;
   renderer_state_t *renderer = &handler->renderer;
   int rp_idx = (target_render_pass == handler->offscreen_render_pass) ? 1 : 0;
-pipeline_cache_entry_t *entry = &renderer->pipeline_cache[shader->id][rp_idx];
+  pipeline_cache_entry_t *entry = &renderer->pipeline_cache[shader->id][rp_idx];
 
   if (entry->initialized && entry->ubo_count == ubo_count && entry->texture_count == texture_count && entry->render_pass == target_render_pass) {
     return entry;
@@ -760,7 +712,6 @@ pipeline_cache_entry_t *entry = &renderer->pipeline_cache[shader->id][rp_idx];
   entry->texture_count = texture_count;
   entry->render_pass = target_render_pass;
 
-  // Internal Layout Selection Logic
   VkVertexInputBindingDescription *binding_descs;
   uint32_t b_desc_count;
   VkVertexInputAttributeDescription *attrib_descs;
@@ -849,7 +800,6 @@ pipeline_cache_entry_t *entry = &renderer->pipeline_cache[shader->id][rp_idx];
     src_color_factor = VK_BLEND_FACTOR_SRC_ALPHA;
   }
 
-  // CORRECTED: Standard Alpha Blending
   VkPipelineColorBlendAttachmentState color_blend = {
       .blendEnable = VK_TRUE,
       .srcColorBlendFactor = src_color_factor,
@@ -947,7 +897,7 @@ texture_t *renderer_load_compact_texture_from_array(gfx_handler_t *handler, cons
   VkDeviceSize image_size = (VkDeviceSize)width * height * 4;
 
   stbi_uc *rgba_pixels = calloc(1, image_size);
-  if (height == 1 && width == 1) { // Special case for default texture
+  if (height == 1 && width == 1) {
     memcpy(rgba_pixels, pixel_array, image_size);
   } else {
     for (uint32_t i = 0; i < width * height; i++) {
@@ -1015,9 +965,9 @@ texture_t *renderer_load_texture_from_array(gfx_handler_t *handler, const uint8_
   VkDeviceSize image_size = (VkDeviceSize)width * height * 4;
 
   stbi_uc *rgba_pixels = malloc(image_size);
-  if (height == 1 && width == 1) { // Special case for default texture
+  if (height == 1 && width == 1) {
     memcpy(rgba_pixels, pixel_array, image_size);
-  } else { // Convert R to RGBA
+  } else {
     for (uint32_t i = 0; i < width * height; i++) {
       rgba_pixels[i * 4 + 0] = pixel_array[i];
       rgba_pixels[i * 4 + 1] = pixel_array[i];
@@ -1190,7 +1140,7 @@ texture_t *renderer_create_texture_from_rgba(gfx_handler_t *handler, const unsig
   texture->last_used_frame = handler->g_main_window_data.FrameIndex;
   texture->width = width;
   texture->height = height;
-  texture->mip_levels = 1; // No mipmaps for previews
+  texture->mip_levels = 1;
   texture->layer_count = 1;
   strncpy(texture->path, "from_rgba_memory", sizeof(texture->path) - 1);
 
@@ -1274,7 +1224,6 @@ mesh_t *renderer_create_mesh(gfx_handler_t *handler, vertex_t *vertices, uint32_
     mesh->index_count = 0;
   }
 
-  // log_info(LOG_SOURCE, "Created mesh (Vertices: %u, Indices: %u)", vertex_count, index_count);
   return mesh;
 }
 
@@ -1294,6 +1243,7 @@ void renderer_begin_frame(gfx_handler_t *handler, VkCommandBuffer command_buffer
   VkRect2D scissor = {{0.0, 0.0}, {handler->viewport[0], handler->viewport[1]}};
   vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 }
+
 void renderer_draw_mesh(gfx_handler_t *handler, VkCommandBuffer command_buffer, mesh_t *mesh, shader_t *shader, texture_t **textures,
                         uint32_t texture_count, void **ubos, VkDeviceSize *ubo_sizes, uint32_t ubo_count) {
   if (!mesh || !shader || !mesh->active || !shader->active) return;
@@ -1302,7 +1252,6 @@ void renderer_draw_mesh(gfx_handler_t *handler, VkCommandBuffer command_buffer, 
   pipeline_cache_entry_t *pso = get_or_create_pipeline(handler, shader, ubo_count, texture_count, handler->g_main_window_data.RenderPass);
   if (!pso) return;
 
-  // Allocate a descriptor set for this pipeline
   VkDescriptorSet descriptor_set;
   uint32_t frame_pool_index = handler->g_main_window_data.FrameIndex % 3;
   VkDescriptorSetAllocateInfo alloc_info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -1510,11 +1459,9 @@ void world_to_screen(gfx_handler_t *h, float wx, float wy, float *sx, float *sy)
 
   float max_map_size = fmaxf(h->map_data->width, h->map_data->height) * 0.001f;
 
-  // World offset from camera center -> NDC
   float ndc_x = (wx - cam->pos[0]) * (cam->zoom * max_map_size);
   float ndc_y = (wy - cam->pos[1]) * (cam->zoom * max_map_size * aspect);
 
-  // NDC [-1..1] to screen pixels [0..w],[0..h]
   *sx = (ndc_x + 1.0f) * 0.5f * h->viewport[0];
   *sy = (ndc_y + 1.0f) * 0.5f * h->viewport[1];
 }
@@ -1535,7 +1482,6 @@ static void setup_vertex_descriptions(void) {
   mesh_attribute_descriptions[2] =
       (VkVertexInputAttributeDescription){.binding = 0, .location = 2, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(vertex_t, tex_coord)};
 
-  // skin instanced data
   skin_binding_desc[0] = (VkVertexInputBindingDescription){.binding = 0, .stride = sizeof(vertex_t), .inputRate = VK_VERTEX_INPUT_RATE_VERTEX};
   skin_binding_desc[1] =
       (VkVertexInputBindingDescription){.binding = 1, .stride = sizeof(skin_instance_t), .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE};
@@ -1561,7 +1507,6 @@ static void setup_vertex_descriptions(void) {
       .binding = 1, .location = 8, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(skin_instance_t, attach)};
   skin_attrib_descs[i++] =
       (VkVertexInputAttributeDescription){.binding = 1, .location = 9, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(skin_instance_t, dir)};
-  // colors
   skin_attrib_descs[i++] = (VkVertexInputAttributeDescription){
       .binding = 1, .location = 10, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(skin_instance_t, col_body)};
   skin_attrib_descs[i++] = (VkVertexInputAttributeDescription){
@@ -1571,16 +1516,13 @@ static void setup_vertex_descriptions(void) {
   skin_attrib_descs[i++] =
       (VkVertexInputAttributeDescription){.binding = 1, .location = 13, .format = VK_FORMAT_R32_SINT, .offset = offsetof(skin_instance_t, col_gs)};
 
-  // Atlas instanced data
   atlas_binding_desc[0] = (VkVertexInputBindingDescription){.binding = 0, .stride = sizeof(vertex_t), .inputRate = VK_VERTEX_INPUT_RATE_VERTEX};
   atlas_binding_desc[1] =
       (VkVertexInputBindingDescription){.binding = 1, .stride = sizeof(atlas_instance_t), .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE};
 
   i = 0;
-  // from vertex_t (binding 0)
   atlas_attrib_descs[i++] =
       (VkVertexInputAttributeDescription){.binding = 0, .location = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(vertex_t, pos)};
-  // from atlas_instance_t (binding 1)
   atlas_attrib_descs[i++] =
       (VkVertexInputAttributeDescription){.binding = 1, .location = 1, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(atlas_instance_t, pos)};
   atlas_attrib_descs[i++] =
@@ -1589,7 +1531,7 @@ static void setup_vertex_descriptions(void) {
       .binding = 1, .location = 3, .format = VK_FORMAT_R32_SFLOAT, .offset = offsetof(atlas_instance_t, rotation)};
   atlas_attrib_descs[i++] = (VkVertexInputAttributeDescription){.binding = 1,
                                                                 .location = 4,
-                                                                .format = VK_FORMAT_R32_SINT, // Use SINT for integer index
+                                                                .format = VK_FORMAT_R32_SINT,
                                                                 .offset = offsetof(atlas_instance_t, sprite_index)};
   atlas_attrib_descs[i++] = (VkVertexInputAttributeDescription){
       .binding = 1, .location = 5, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(atlas_instance_t, uv_scale)};
@@ -1608,14 +1550,12 @@ static void flush_primitives(gfx_handler_t *h, VkCommandBuffer command_buffer) {
     return;
   }
 
-  // Get or create the pipeline
   pipeline_cache_entry_t *pso = get_or_create_pipeline(h, renderer->primitive_shader, 1, 0, h->g_main_window_data.RenderPass);
   if (!pso) {
     log_error(LOG_SOURCE, "Failed to get primitive pipeline");
     return;
   }
 
-  // Setup UBO
   primitive_ubo_t ubo;
   ubo.camPos[0] = h->renderer.camera.pos[0];
   ubo.camPos[1] = h->renderer.camera.pos[1];
@@ -1632,13 +1572,11 @@ static void flush_primitives(gfx_handler_t *h, VkCommandBuffer command_buffer) {
 
   glm_ortho_rh_zo(-1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, ubo.proj);
 
-  // Allocate UBO space
   VkDeviceSize ubo_size = sizeof(ubo);
   VkDeviceSize aligned_size = (ubo_size + renderer->min_ubo_alignment - 1) & ~(renderer->min_ubo_alignment - 1);
 
   if (renderer->ubo_buffer_offset + aligned_size > DYNAMIC_UBO_BUFFER_SIZE) {
     log_error(LOG_SOURCE, "UBO buffer exhausted during primitive flush");
-    // Stop drawing new primitives this frame but don't reset
     return;
   }
 
@@ -1646,7 +1584,6 @@ static void flush_primitives(gfx_handler_t *h, VkCommandBuffer command_buffer) {
   memcpy((char *)renderer->ubo_buffer_ptr + dynamic_offset, &ubo, ubo_size);
   renderer->ubo_buffer_offset += (uint32_t)aligned_size;
 
-  // Allocate descriptor set
   uint32_t frame_pool_index = h->g_main_window_data.FrameIndex % 3;
   VkDescriptorSet descriptor_set;
   VkDescriptorSetAllocateInfo alloc_info = {
@@ -1661,7 +1598,6 @@ static void flush_primitives(gfx_handler_t *h, VkCommandBuffer command_buffer) {
     return;
   }
 
-  // Update descriptor set
   VkDescriptorBufferInfo buffer_info = {
       .buffer = renderer->dynamic_ubo_buffer.buffer,
       .offset = dynamic_offset,
@@ -1677,7 +1613,6 @@ static void flush_primitives(gfx_handler_t *h, VkCommandBuffer command_buffer) {
 
   vkUpdateDescriptorSets(h->g_device, 1, &descriptor_write, 0, NULL);
 
-  // Draw
   vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pso->pipeline);
 
   VkDeviceSize offsets[] = {0};
@@ -1688,7 +1623,6 @@ static void flush_primitives(gfx_handler_t *h, VkCommandBuffer command_buffer) {
   uint32_t count_to_draw = renderer->primitive_index_count - renderer->primitive_index_offset_drawn;
   vkCmdDrawIndexed(command_buffer, count_to_draw, 1, renderer->primitive_index_offset_drawn, 0, 0);
 
-  // Advance the drawn offset
   renderer->primitive_index_offset_drawn = renderer->primitive_index_count;
 }
 
@@ -1696,15 +1630,11 @@ static void ensure_primitive_space(gfx_handler_t *handler, uint32_t vertex_count
   renderer_state_t *renderer = &handler->renderer;
   if (renderer->primitive_vertex_count + vertex_count > MAX_PRIMITIVE_VERTICES ||
       renderer->primitive_index_count + index_count > MAX_PRIMITIVE_INDICES) {
-    // If full, flush what we have so far
     flush_primitives(handler, renderer->current_command_buffer);
 
-    // Check again. If still full (because we didn't reset), we are out of space for this frame.
     if (renderer->primitive_vertex_count + vertex_count > MAX_PRIMITIVE_VERTICES ||
         renderer->primitive_index_count + index_count > MAX_PRIMITIVE_INDICES) {
       log_error(LOG_SOURCE, "Primitive buffer overflow! Increase MAX_PRIMITIVE_VERTICES/INDICES.");
-      // We can't safely reset here because previous draw calls depend on the data.
-      // Dropping geometry is the only safe fallback without ring buffering.
     }
   }
 }
@@ -1717,7 +1647,6 @@ void renderer_draw_rect_filled(gfx_handler_t *handler, vec2 pos, vec2 size, vec4
   primitive_vertex_t *vtx = renderer->vertex_buffer_ptr + base_index;
   uint32_t *idx = renderer->index_buffer_ptr + renderer->primitive_index_count;
 
-  // Define vertices in world space
   vtx[0].pos[0] = pos[0];
   vtx[0].pos[1] = pos[1];
   glm_vec4_copy(color, vtx[0].color);
@@ -1734,7 +1663,6 @@ void renderer_draw_rect_filled(gfx_handler_t *handler, vec2 pos, vec2 size, vec4
   vtx[3].pos[1] = pos[1] + size[1];
   glm_vec4_copy(color, vtx[3].color);
 
-  // Triangle indices (two triangles)
   idx[0] = base_index + 0;
   idx[1] = base_index + 1;
   idx[2] = base_index + 2;
@@ -1756,12 +1684,10 @@ void renderer_draw_circle_filled(gfx_handler_t *handler, vec2 center, float radi
   primitive_vertex_t *vtx = renderer->vertex_buffer_ptr + base_index;
   uint32_t *idx = renderer->index_buffer_ptr + renderer->primitive_index_count;
 
-  // Center vertex
   vtx[0].pos[0] = center[0];
   vtx[0].pos[1] = center[1];
   glm_vec4_copy(color, vtx[0].color);
 
-  // Outer vertices
   float angle_step = 2.0f * M_PI / segments;
   for (uint32_t i = 0; i < segments; i++) {
     float angle = i * angle_step;
@@ -1770,7 +1696,6 @@ void renderer_draw_circle_filled(gfx_handler_t *handler, vec2 center, float radi
     glm_vec4_copy(color, vtx[i + 1].color);
   }
 
-  // Triangle fan indices
   for (uint32_t i = 0; i < segments; i++) {
     idx[i * 3 + 0] = base_index;
     idx[i * 3 + 1] = base_index + i + 1;
@@ -1780,7 +1705,7 @@ void renderer_draw_circle_filled(gfx_handler_t *handler, vec2 center, float radi
   renderer->primitive_vertex_count += segments + 1;
   renderer->primitive_index_count += segments * 3;
 }
-// TODO: ensuring the width of the thing is atleast 1px is kinda expensive. think of another way to do this
+
 void renderer_draw_line(gfx_handler_t *handler, vec2 p1, vec2 p2, vec4 color, float thickness) {
   ensure_primitive_space(handler, 4, 6);
 
@@ -1789,60 +1714,30 @@ void renderer_draw_line(gfx_handler_t *handler, vec2 p1, vec2 p2, vec4 color, fl
   primitive_vertex_t *vtx = renderer->vertex_buffer_ptr + base_index;
   uint32_t *idx = renderer->index_buffer_ptr + renderer->primitive_index_count;
 
-  // Calculate perpendicular direction
   vec2 dir;
   glm_vec2_sub(p2, p1, dir);
-  float len = glm_vec2_norm(dir);
+  glm_vec2_normalize(dir);
 
-  if (len < 1e-6f) {
-    // Line is too short, skip
-    return;
-  }
-
-  glm_vec2_scale(dir, 1.0f / len, dir);
   vec2 normal = {-dir[1], dir[0]};
+  vec2 offset;
+  glm_vec2_scale(normal, thickness * 0.5f, offset);
 
-  // Calculate minimum pixel thickness in world space
-  const float MIN_PIXELS = 1.0f;
-  float sx1, sy1, sx1n, sy1n;
-  float sx2, sy2, sx2n, sy2n;
-
-  world_to_screen(handler, p1[0], p1[1], &sx1, &sy1);
-  world_to_screen(handler, p1[0] + normal[0], p1[1] + normal[1], &sx1n, &sy1n);
-  world_to_screen(handler, p2[0], p2[1], &sx2, &sy2);
-  world_to_screen(handler, p2[0] + normal[0], p2[1] + normal[1], &sx2n, &sy2n);
-
-  float pix_per_unit_p1 = hypotf(sx1n - sx1, sy1n - sy1);
-  float pix_per_unit_p2 = hypotf(sx2n - sx2, sy2n - sy2);
-
-  const float EPS = 1e-6f;
-  if (pix_per_unit_p1 < EPS) pix_per_unit_p1 = (pix_per_unit_p2 > EPS ? pix_per_unit_p2 : 1.0f);
-  if (pix_per_unit_p2 < EPS) pix_per_unit_p2 = (pix_per_unit_p1 > EPS ? pix_per_unit_p1 : 1.0f);
-
-  float min_world_thickness_p1 = MIN_PIXELS / pix_per_unit_p1;
-  float min_world_thickness_p2 = MIN_PIXELS / pix_per_unit_p2;
-
-  float half_t1 = fmaxf(thickness * 0.5f, min_world_thickness_p1 * 0.5f);
-  float half_t2 = fmaxf(thickness * 0.5f, min_world_thickness_p2 * 0.5f);
-
-  // Create quad vertices
-  vtx[0].pos[0] = p1[0] - normal[0] * half_t1;
-  vtx[0].pos[1] = p1[1] - normal[1] * half_t1;
+  vtx[0].pos[0] = p1[0] + offset[0];
+  vtx[0].pos[1] = p1[1] + offset[1];
   glm_vec4_copy(color, vtx[0].color);
 
-  vtx[1].pos[0] = p2[0] - normal[0] * half_t2;
-  vtx[1].pos[1] = p2[1] - normal[1] * half_t2;
+  vtx[1].pos[0] = p2[0] + offset[0];
+  vtx[1].pos[1] = p2[1] + offset[1];
   glm_vec4_copy(color, vtx[1].color);
 
-  vtx[2].pos[0] = p2[0] + normal[0] * half_t2;
-  vtx[2].pos[1] = p2[1] + normal[1] * half_t2;
+  vtx[2].pos[0] = p2[0] - offset[0];
+  vtx[2].pos[1] = p2[1] - offset[1];
   glm_vec4_copy(color, vtx[2].color);
 
-  vtx[3].pos[0] = p1[0] + normal[0] * half_t1;
-  vtx[3].pos[1] = p1[1] + normal[1] * half_t1;
+  vtx[3].pos[0] = p1[0] - offset[0];
+  vtx[3].pos[1] = p1[1] - offset[1];
   glm_vec4_copy(color, vtx[3].color);
 
-  // Triangle indices
   idx[0] = base_index + 0;
   idx[1] = base_index + 1;
   idx[2] = base_index + 2;
