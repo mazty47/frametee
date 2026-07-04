@@ -10,32 +10,43 @@
 #include <system/include_cimgui.h>
 #include <user_interface/timeline/timeline_model.h>
 #include <system/skin/skin_fetch.h>
-#include <pthread.h>
 #include <stdatomic.h>
 #include <symbols.h>
 #include <math.h>
 
-static void draw_spinning_icon(ImVec2 center, const char* icon_text) {
-    ImVec2 text_size;
-    igCalcTextSize(&text_size, icon_text, NULL, false, -1.0f);
-    ImVec2 top_left = {center.x - text_size.x * 0.5f, center.y - text_size.y * 0.5f};
+#ifdef _WIN32
+#include <windows.h>
+typedef HANDLE thread_t;
+#define THREAD_FUNC DWORD WINAPI
+#define THREAD_RETURN return 0
+#else
+#include <pthread.h>
+typedef pthread_t thread_t;
+#define THREAD_FUNC void*
+#define THREAD_RETURN return NULL
+#endif
 
-    ImDrawList* draw_list = igGetWindowDrawList();
-    int vtx_start = draw_list->VtxBuffer.Size;
-    ImDrawList_AddText_Vec2(draw_list, top_left, 0xFFFFFFFF, icon_text, NULL);
-    int vtx_end = draw_list->VtxBuffer.Size;
-    
-    float angle = igGetTime() * 10.0f;
-    float cos_a = cosf(angle);
-    float sin_a = sinf(angle);
-    
-    for (int j = vtx_start; j < vtx_end; ++j) {
-        ImDrawVert* v = &draw_list->VtxBuffer.Data[j];
-        float dx = v->pos.x - center.x;
-        float dy = v->pos.y - center.y;
-        v->pos.x = center.x + (dx * cos_a - dy * sin_a);
-        v->pos.y = center.y + (dx * sin_a + dy * cos_a);
-    }
+static void draw_spinning_icon(ImVec2 center, const char* icon_text) {
+  ImVec2 text_size;
+  igCalcTextSize(&text_size, icon_text, NULL, false, -1.0f);
+  ImVec2 top_left = {center.x - text_size.x * 0.5f, center.y - text_size.y * 0.5f};
+
+  ImDrawList* draw_list = igGetWindowDrawList();
+  int vtx_start = draw_list->VtxBuffer.Size;
+  ImDrawList_AddText_Vec2(draw_list, top_left, 0xFFFFFFFF, icon_text, NULL);
+  int vtx_end = draw_list->VtxBuffer.Size;
+  
+  float angle = igGetTime() * 10.0f;
+  float cos_a = cosf(angle);
+  float sin_a = sinf(angle);
+  
+  for (int j = vtx_start; j < vtx_end; ++j) {
+    ImDrawVert* v = &draw_list->VtxBuffer.Data[j];
+    float dx = v->pos.x - center.x;
+    float dy = v->pos.y - center.y;
+    v->pos.x = center.x + (dx * cos_a - dy * sin_a);
+    v->pos.y = center.y + (dx * sin_a + dy * cos_a);
+  }
 }
 
 typedef struct {
@@ -48,14 +59,14 @@ typedef struct {
 
 #define MAX_TASKS 32
 static skin_fetch_task_t g_fetch_tasks[MAX_TASKS];
-static pthread_t g_fetch_threads[MAX_TASKS];
+static thread_t g_fetch_threads[MAX_TASKS];
 
-static void* fetch_skin_thread(void* arg) {
+static THREAD_FUNC fetch_skin_thread(void* arg) {
   skin_fetch_task_t* task = (skin_fetch_task_t*)arg;
   bool ok = fetch_skin(task->skin_name, task->fetched_path, sizeof(task->fetched_path));
   task->success = ok;
   task->done = true;
-  return NULL;
+  THREAD_RETURN;
 }
 
 static void start_skin_fetch(player_info_t* info) {
@@ -65,9 +76,13 @@ static void start_skin_fetch(player_info_t* info) {
   for (int i = 0; i < MAX_TASKS; ++i) {
     if (!g_fetch_tasks[i].done && g_fetch_tasks[i].target != NULL) continue;
     
-    // Found empty slot or completed slot
     if (g_fetch_tasks[i].target != NULL) {
-      pthread_join(g_fetch_threads[i], NULL); // cleanup old thread
+#ifdef _WIN32
+      WaitForSingleObject(g_fetch_threads[i], INFINITE);
+      CloseHandle(g_fetch_threads[i]);
+#else
+      pthread_join(g_fetch_threads[i], NULL);
+#endif
     }
     
     g_fetch_tasks[i].target = info;
@@ -75,12 +90,14 @@ static void start_skin_fetch(player_info_t* info) {
     g_fetch_tasks[i].success = false;
     strncpy(g_fetch_tasks[i].skin_name, info->skin_name, sizeof(g_fetch_tasks[i].skin_name) - 1);
     
+#ifdef _WIN32
+    g_fetch_threads[i] = CreateThread(NULL, 0, fetch_skin_thread, &g_fetch_tasks[i], 0, NULL);
+#else
     pthread_create(&g_fetch_threads[i], NULL, fetch_skin_thread, &g_fetch_tasks[i]);
+#endif
     break;
   }
 }
-
-// static const char *LOG_SOURCE = "SkinManager";
 
 void render_player_info(gfx_handler_t *h) {
   timeline_state_t *ts = &h->user_interface.timeline;
@@ -120,11 +137,9 @@ void render_player_info(gfx_handler_t *h) {
       draw_spinning_icon(pos, ICON_FA_ROTATE);
     }
     
-    // Check completed tasks
     for (int i = 0; i < MAX_TASKS; ++i) {
       if (g_fetch_tasks[i].target == player_info && g_fetch_tasks[i].done) {
         if (g_fetch_tasks[i].success) {
-          // Load it into Vulkan!
           texture_t* unused_preview = NULL;
           int real_id = renderer_load_skin_from_file(h, g_fetch_tasks[i].fetched_path, &unused_preview);
           if (real_id >= 0) {
@@ -142,8 +157,13 @@ void render_player_info(gfx_handler_t *h) {
           }
         }
         player_info->fetching_skin = false;
-        g_fetch_tasks[i].target = NULL; // free slot
+        g_fetch_tasks[i].target = NULL;
+#ifdef _WIN32
+        WaitForSingleObject(g_fetch_threads[i], INFINITE);
+        CloseHandle(g_fetch_threads[i]);
+#else
         pthread_join(g_fetch_threads[i], NULL);
+#endif
       }
     }
     igCheckbox("Use custom color", &player_info->use_custom_color);
@@ -158,7 +178,7 @@ void render_player_info(gfx_handler_t *h) {
     igSeparator();
     igText("Starting Configuration");
     starting_config_t *sc = &ts->player_tracks[ts->selected_player_track_index].starting_config;
-    // TODO: somehow reset to default values when turning off, idk how to cleanly do that yet
+
     if (igCheckbox("Override Start", &sc->enabled)) {
       if (sc->enabled) {
         SWorldCore world = wc_empty();
@@ -311,7 +331,7 @@ int skin_manager_add(skin_manager_t *m, const skin_info_t *skin) {
     return -1;
   }
   m->skins = new_skins;
-  m->skins[m->num_skins] = *skin; // copy struct
+  m->skins[m->num_skins] = *skin; 
   ++m->num_skins;
   return 0;
 }
@@ -319,7 +339,6 @@ int skin_manager_add(skin_manager_t *m, const skin_info_t *skin) {
 int skin_manager_remove(skin_manager_t *m, gfx_handler_t *h, int index) {
   if (!m || !h || index < 0 || index >= m->num_skins) return -1;
 
-  // Unload from renderer and destroy preview
   renderer_unload_skin(h, m->skins[index].id);
   if (m->skins[index].preview_texture) {
     destroy_imgui_texture_ref(&m->skins[index].preview_texture);
@@ -331,7 +350,6 @@ int skin_manager_remove(skin_manager_t *m, gfx_handler_t *h, int index) {
   if (m->skins[index].data) {
     free(m->skins[index].data);
   }
-  // shift elements down
   for (int i = index; i < m->num_skins - 1; i++) {
     m->skins[i] = m->skins[i + 1];
   }
