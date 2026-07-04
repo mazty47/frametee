@@ -1,14 +1,8 @@
 cmake_minimum_required(VERSION 3.14)
 
 set(CMAKE_C_STANDARD 11)
-set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_C_STANDARD_REQUIRED TRUE)
 
-add_compile_options(
-    $<$<C_COMPILER_ID:MSVC>:/std:c11>
-)
-message(STATUS "C compiler: ${CMAKE_C_COMPILER}")
-message(STATUS "C flags: ${CMAKE_C_FLAGS}")
 # Option to enable sanitizers
 option(ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 
